@@ -45,15 +45,36 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// Post to WhatsApp Channel Endpoint
+// Post to WhatsApp Channel Endpoint with Auto Invite Resolver
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text } = req.body;
-        let jid = channel_id.includes('@newsletter') ? channel_id : `${channel_id}@newsletter`;
-        
+        if (!sock) {
+            return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
+        }
+
+        let cleanCode = channel_id.replace('@newsletter', '').replace('https://whatsapp.com/channel/', '').trim();
+        let jid = cleanCode;
+
+        // Auto-resolve channel invite code to actual Newsletter JID
+        if (!cleanCode.startsWith('120363')) {
+            try {
+                const metadata = await sock.newsletterMetadata("invite", cleanCode);
+                if (metadata && metadata.id) {
+                    jid = metadata.id;
+                }
+            } catch (metaErr) {
+                console.log(`Failed resolving metadata for ${cleanCode}, falling back...`);
+                jid = `${cleanCode}@newsletter`;
+            }
+        } else if (!cleanCode.endsWith('@newsletter')) {
+            jid = `${cleanCode}@newsletter`;
+        }
+
         await sock.sendMessage(jid, { text: text });
-        res.json({ status: 'success', message: 'Posted to channel!' });
+        res.json({ status: 'success', message: 'Posted to channel successfully!' });
     } catch (error) {
+        console.error('Send error:', error);
         res.status(500).json({ status: 'error', error: error.message });
     }
 });
