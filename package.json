@@ -1,0 +1,14 @@
+{
+  "name": "wa-channel-bridge",
+  "version": "1.0.0",
+  "description": "WhatsApp Channel Free Bridge",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.3"
+  }
+}
