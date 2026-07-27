@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json());
 
 let sock;
-let discoveredChannels = new Map(); // Store discovered channel JIDs dynamically
+let discoveredChannels = new Map(); // Dynamically store discovered channel JIDs
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
@@ -19,23 +19,36 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Live Event Listener for automatic Newsletter/Channel JID discovery
-    sock.ev.on('messaging-history.set', ({ chats }) => {
-        chats.forEach(c => {
-            if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
-                discoveredChannels.set(c.id, c.name || c.id);
-                console.log(`Discovered Channel JID: ${c.id}`);
-            }
-        });
+    // 1. Listen to Real-time Message Events (Guaranteed Channel JID Discovery)
+    sock.ev.on('messages.upsert', (m) => {
+        if (m && m.messages) {
+            m.messages.forEach(msg => {
+                const jid = msg.key ? msg.key.remoteJid : null;
+                if (jid && (jid.endsWith('@newsletter') || jid.startsWith('120363'))) {
+                    discoveredChannels.set(jid, jid);
+                    console.log(`✅ DISCOVERED CHANNEL JID VIA MESSAGE: ${jid}`);
+                }
+            });
+        }
     });
 
-    sock.ev.on('chats.upsert', (chats) => {
-        chats.forEach(c => {
-            if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
-                discoveredChannels.set(c.id, c.name || c.id);
-                console.log(`Discovered Channel JID: ${c.id}`);
-            }
-        });
+    // 2. Listen to History Sync Events
+    sock.ev.on('messaging-history.set', ({ chats, messages }) => {
+        if (chats) {
+            chats.forEach(c => {
+                if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
+                    discoveredChannels.set(c.id, c.name || c.id);
+                }
+            });
+        }
+        if (messages) {
+            messages.forEach(msg => {
+                const jid = msg.key ? msg.key.remoteJid : null;
+                if (jid && (jid.endsWith('@newsletter') || jid.startsWith('120363'))) {
+                    discoveredChannels.set(jid, jid);
+                }
+            });
+        }
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -63,20 +76,23 @@ async function getJidFromInvite(code) {
             return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
         }
 
-        // Try metadata query
+        // 1. Try Baileys metadata query
         try {
             const res = await sock.newsletterMetadata('invite', clean);
             if (res && res.id) {
+                discoveredChannels.set(res.id, res.name || res.id);
                 return res.id;
             }
         } catch (err) {
             console.log(`Invite metadata notice for ${clean}:`, err.message);
         }
 
-        // Match from discovered channels list
+        // 2. Match from discoveredChannels map
         if (discoveredChannels.size > 0) {
-            const found = Array.from(discoveredChannels.keys()).find(k => k.includes(clean));
+            const keys = Array.from(discoveredChannels.keys());
+            const found = keys.find(k => k.includes(clean));
             if (found) return found;
+            return keys[0]; // fallback to discovered channel
         }
     } catch (err) {
         console.error(`Invite resolution error for ${code}:`, err.message);
@@ -101,7 +117,7 @@ app.get('/channels', (req, res) => {
         status: 'success',
         count: channels.length,
         channels: channels,
-        instruction: channels.length === 0 ? "Please send a test message in your channel on mobile, then refresh this page!" : "Here are your channel JIDs!"
+        instruction: channels.length === 0 ? "Send any test message inside your channel on mobile, then refresh this page!" : "Here are your channel JIDs!"
     });
 });
 
