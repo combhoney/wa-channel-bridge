@@ -35,7 +35,26 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp();
 
-// QR Code View Endpoint
+// Helper function to resolve invite code to JID safely
+async function getJidFromInvite(code) {
+    try {
+        const clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
+        if (clean.startsWith('120363')) {
+            return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
+        }
+        const res = await sock.newsletterMetadata('invite', clean);
+        if (res && res.id) {
+            // Auto follow newsletter if not already following
+            try { await sock.newsletterFollow(res.id); } catch(e){}
+            return res.id;
+        }
+    } catch (err) {
+        console.error(`Invite resolution error for ${code}:`, err.message);
+    }
+    return null;
+}
+
+// QR Code Endpoint
 app.get('/qr', async (req, res) => {
     if (app.locals.qr) {
         const qrImage = await QRCode.toDataURL(app.locals.qr);
@@ -45,7 +64,22 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// Post to WhatsApp Channel Endpoint with Invite Resolution
+// Resolve Channel Endpoint (Visit in browser)
+app.get('/resolve/:code', async (req, res) => {
+    try {
+        if (!sock) return res.status(500).json({ error: 'Socket not ready' });
+        const jid = await getJidFromInvite(req.params.code);
+        if (jid) {
+            res.json({ status: 'success', inviteCode: req.params.code, jid: jid });
+        } else {
+            res.status(400).json({ status: 'error', error: 'Could not resolve JID' });
+        }
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+// Post to WhatsApp Channel Endpoint
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text } = req.body;
@@ -53,27 +87,16 @@ app.post('/send', async (req, res) => {
             return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
         }
 
-        let cleanCode = channel_id.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
-        let targetJid = cleanCode;
+        let targetJid = await getJidFromInvite(channel_id);
 
-        // Auto-resolve invite code to numeric JID
-        if (!cleanCode.startsWith('120363')) {
-            try {
-                const metadata = await sock.newsletterMetadata("invite", cleanCode);
-                if (metadata && metadata.id) {
-                    targetJid = metadata.id;
-                    console.log(`Resolved code ${cleanCode} -> JID: ${targetJid}`);
-                }
-            } catch (metaErr) {
-                console.log(`Metadata lookup notice for ${cleanCode}: ${metaErr.message}`);
-            }
+        if (!targetJid) {
+            return res.status(400).json({ 
+                status: 'error', 
+                error: `Could not resolve JID for '${channel_id}'. Make sure your WhatsApp account follows or owns this channel.` 
+            });
         }
 
-        if (!targetJid.endsWith('@newsletter')) {
-            targetJid = `${targetJid}@newsletter`;
-        }
-
-        console.log(`Sending message to channel: ${targetJid}`);
+        console.log(`Sending message to newsletter JID: ${targetJid}`);
         await sock.sendMessage(targetJid, { text: text });
         res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
 
