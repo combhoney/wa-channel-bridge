@@ -5,7 +5,6 @@ const app = express();
 app.use(express.json());
 
 let sock;
-let discoveredChannels = new Map(); // Dynamically store discovered channel JIDs
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
@@ -19,39 +18,7 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // 1. Listen to Real-time Message Events (Guaranteed Channel JID Discovery)
-    sock.ev.on('messages.upsert', (m) => {
-        if (m && m.messages) {
-            m.messages.forEach(msg => {
-                const jid = msg.key ? msg.key.remoteJid : null;
-                if (jid && (jid.endsWith('@newsletter') || jid.startsWith('120363'))) {
-                    discoveredChannels.set(jid, jid);
-                    console.log(`✅ DISCOVERED CHANNEL JID VIA MESSAGE: ${jid}`);
-                }
-            });
-        }
-    });
-
-    // 2. Listen to History Sync Events
-    sock.ev.on('messaging-history.set', ({ chats, messages }) => {
-        if (chats) {
-            chats.forEach(c => {
-                if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
-                    discoveredChannels.set(c.id, c.name || c.id);
-                }
-            });
-        }
-        if (messages) {
-            messages.forEach(msg => {
-                const jid = msg.key ? msg.key.remoteJid : null;
-                if (jid && (jid.endsWith('@newsletter') || jid.startsWith('120363'))) {
-                    discoveredChannels.set(jid, jid);
-                }
-            });
-        }
-    });
-
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, qr } = update;
         if (qr) {
             app.locals.qr = qr;
@@ -62,43 +29,33 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Connected Successfully!');
             app.locals.qr = null;
+
+            // Fetch and print Channel JIDs automatically using newsletterMetadata
+            setTimeout(async () => {
+                const inviteCodes = [
+                    "0029VbCsrU6IHphJ1G2Ctv0X",
+                    "0029VbDN5b3CsU9XlRYVRq0s",
+                    "0029VbDIfE217EmxC6bLbb3A"
+                ];
+
+                console.log("\n================ YOUR CHANNEL JIDs ================");
+                for (const code of inviteCodes) {
+                    try {
+                        const metadata = await sock.newsletterMetadata("invite", code);
+                        if (metadata && metadata.id) {
+                            console.log(`INVITE: ${code}  ===>  JID: ${metadata.id}`);
+                        }
+                    } catch (err) {
+                        console.error(`Could not resolve code ${code}:`, err.message);
+                    }
+                }
+                console.log("====================================================\n");
+            }, 3000);
         }
     });
 }
 
 connectToWhatsApp();
-
-// Helper to resolve invite code or return matching channel JID
-async function getJidFromInvite(code) {
-    try {
-        let clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
-        if (clean.startsWith('120363')) {
-            return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
-        }
-
-        // 1. Try Baileys metadata query
-        try {
-            const res = await sock.newsletterMetadata('invite', clean);
-            if (res && res.id) {
-                discoveredChannels.set(res.id, res.name || res.id);
-                return res.id;
-            }
-        } catch (err) {
-            console.log(`Invite metadata notice for ${clean}:`, err.message);
-        }
-
-        // 2. Match from discoveredChannels map
-        if (discoveredChannels.size > 0) {
-            const keys = Array.from(discoveredChannels.keys());
-            const found = keys.find(k => k.includes(clean));
-            if (found) return found;
-            return keys[0]; // fallback to discovered channel
-        }
-    } catch (err) {
-        console.error(`Invite resolution error for ${code}:`, err.message);
-    }
-    return null;
-}
 
 // QR Code View Endpoint
 app.get('/qr', async (req, res) => {
@@ -110,17 +67,6 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// List All Discovered Channels Endpoint
-app.get('/channels', (req, res) => {
-    const channels = Array.from(discoveredChannels.entries()).map(([id, name]) => ({ id, name }));
-    res.json({
-        status: 'success',
-        count: channels.length,
-        channels: channels,
-        instruction: channels.length === 0 ? "Send any test message inside your channel on mobile, then refresh this page!" : "Here are your channel JIDs!"
-    });
-});
-
 // Post to WhatsApp Channel Endpoint
 app.post('/send', async (req, res) => {
     try {
@@ -129,13 +75,22 @@ app.post('/send', async (req, res) => {
             return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
         }
 
-        let targetJid = await getJidFromInvite(channel_id);
+        let cleanCode = channel_id.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
+        let targetJid = cleanCode;
 
-        if (!targetJid) {
-            return res.status(400).json({ 
-                status: 'error', 
-                error: `Could not resolve JID for '${channel_id}'. Please send a test message inside your channel on mobile, then try again.` 
-            });
+        if (!cleanCode.startsWith('120363')) {
+            try {
+                const metadata = await sock.newsletterMetadata("invite", cleanCode);
+                if (metadata && metadata.id) {
+                    targetJid = metadata.id;
+                }
+            } catch (err) {
+                console.error(`Metadata lookup notice for ${cleanCode}:`, err.message);
+            }
+        }
+
+        if (!targetJid.endsWith('@newsletter')) {
+            targetJid = `${targetJid}@newsletter`;
         }
 
         console.log(`Sending message to newsletter JID: ${targetJid}`);
