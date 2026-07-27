@@ -5,6 +5,7 @@ const app = express();
 app.use(express.json());
 
 let sock;
+let discoveredChannels = new Map(); // Store discovered channel JIDs dynamically
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
@@ -17,6 +18,25 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // Live Event Listener for automatic Newsletter/Channel JID discovery
+    sock.ev.on('messaging-history.set', ({ chats }) => {
+        chats.forEach(c => {
+            if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
+                discoveredChannels.set(c.id, c.name || c.id);
+                console.log(`Discovered Channel JID: ${c.id}`);
+            }
+        });
+    });
+
+    sock.ev.on('chats.upsert', (chats) => {
+        chats.forEach(c => {
+            if (c.id && (c.id.endsWith('@newsletter') || c.id.startsWith('120363'))) {
+                discoveredChannels.set(c.id, c.name || c.id);
+                console.log(`Discovered Channel JID: ${c.id}`);
+            }
+        });
+    });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, qr } = update;
@@ -35,74 +55,28 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp();
 
-// Direct Stanza Query to fetch all subscribed/owned channels from WhatsApp
-async function getSubscribedNewsletters() {
-    if (!sock) return [];
-    try {
-        const result = await sock.query({
-            tag: 'iq',
-            attrs: {
-                to: '@newsletter',
-                type: 'get',
-                xmlns: 'newsletter'
-            },
-            content: [
-                { tag: 'subscribed', attrs: {} }
-            ]
-        });
-
-        const newsletters = [];
-        if (result && result.content) {
-            for (const child of result.content) {
-                if (child.tag === 'subscribed' && child.content) {
-                    for (const item of child.content) {
-                        if (item.tag === 'newsletter') {
-                            const id = item.attrs.jid || item.attrs.id;
-                            let name = 'WhatsApp Channel';
-                            if (item.content) {
-                                const meta = item.content.find(c => c.tag === 'metadata');
-                                if (meta && meta.content) {
-                                    const nameTag = meta.content.find(c => c.tag === 'name');
-                                    if (nameTag && nameTag.content) name = nameTag.content.toString();
-                                }
-                            }
-                            newsletters.push({ id: id.includes('@newsletter') ? id : `${id}@newsletter`, name });
-                        }
-                    }
-                }
-            }
-        }
-        return newsletters;
-    } catch (e) {
-        console.error('Error fetching newsletters via stanza:', e.message);
-        return [];
-    }
-}
-
-// Helper function to resolve invite code or match channel JID
+// Helper to resolve invite code or return matching channel JID
 async function getJidFromInvite(code) {
     try {
-        const clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
+        let clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
         if (clean.startsWith('120363')) {
             return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
         }
 
-        // 1. Try Baileys metadata lookup
+        // Try metadata query
         try {
             const res = await sock.newsletterMetadata('invite', clean);
             if (res && res.id) {
                 return res.id;
             }
         } catch (err) {
-            console.log(`Invite metadata notice for ${clean}: ${err.message}`);
+            console.log(`Invite metadata notice for ${clean}:`, err.message);
         }
 
-        // 2. Fallback to Stanza Query
-        const list = await getSubscribedNewsletters();
-        if (list && list.length > 0) {
-            const matched = list.find(n => n.id.includes(clean) || n.name.includes(clean));
-            if (matched) return matched.id;
-            return list[0].id;
+        // Match from discovered channels list
+        if (discoveredChannels.size > 0) {
+            const found = Array.from(discoveredChannels.keys()).find(k => k.includes(clean));
+            if (found) return found;
         }
     } catch (err) {
         console.error(`Invite resolution error for ${code}:`, err.message);
@@ -120,31 +94,15 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// List All Channels Endpoint
-app.get('/channels', async (req, res) => {
-    try {
-        if (!sock) return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
-        const channels = await getSubscribedNewsletters();
-        res.json({ status: 'success', count: channels.length, channels });
-    } catch (error) {
-        res.status(500).json({ status: 'error', error: error.message });
-    }
-});
-
-// Resolve Channel Endpoint
-app.get('/resolve/:code', async (req, res) => {
-    try {
-        if (!sock) return res.status(500).json({ error: 'Socket not ready' });
-        const jid = await getJidFromInvite(req.params.code);
-        if (jid) {
-            res.json({ status: 'success', inviteCode: req.params.code, jid: jid });
-        } else {
-            const allChannels = await getSubscribedNewsletters();
-            res.json({ status: 'info', note: 'Invite lookup bypassed. Here are your channels:', channels: allChannels });
-        }
-    } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
-    }
+// List All Discovered Channels Endpoint
+app.get('/channels', (req, res) => {
+    const channels = Array.from(discoveredChannels.entries()).map(([id, name]) => ({ id, name }));
+    res.json({
+        status: 'success',
+        count: channels.length,
+        channels: channels,
+        instruction: channels.length === 0 ? "Please send a test message in your channel on mobile, then refresh this page!" : "Here are your channel JIDs!"
+    });
 });
 
 // Post to WhatsApp Channel Endpoint
@@ -160,7 +118,7 @@ app.post('/send', async (req, res) => {
         if (!targetJid) {
             return res.status(400).json({ 
                 status: 'error', 
-                error: `Could not resolve JID for '${channel_id}'. Please make sure WhatsApp socket is connected.` 
+                error: `Could not resolve JID for '${channel_id}'. Please send a test message inside your channel on mobile, then try again.` 
             });
         }
 
