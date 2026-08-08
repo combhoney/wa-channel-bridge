@@ -7,14 +7,12 @@ app.use(express.json());
 let sock;
 let discoveredChannels = new Map();
 
-// Your 3 WhatsApp Channel Invite Codes
 const KNOWN_INVITES = [
     "0029VbCsrU6IHphJ1G2Ctv0X",
     "0029VbDN5b3CsU9XlRYVRq0s",
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
-// Auto-resolve invite codes directly from WhatsApp WebSocket
 async function syncKnownChannels() {
     if (!sock) return;
     for (const code of KNOWN_INVITES) {
@@ -66,7 +64,6 @@ async function connectToWhatsApp() {
             console.log('✅ WhatsApp Connected Successfully!');
             app.locals.qr = null;
 
-            // Auto-resolve known channel invite codes 3 seconds after connection
             setTimeout(() => {
                 syncKnownChannels();
             }, 3000);
@@ -121,7 +118,6 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-// List All Resolved Channels Endpoint
 app.get('/channels', async (req, res) => {
     await syncKnownChannels();
     const channels = Array.from(discoveredChannels.entries())
@@ -135,9 +131,10 @@ app.get('/channels', async (req, res) => {
     });
 });
 
+// Post to WhatsApp Channel Endpoint (Supports both Image + Caption & Text)
 app.post('/send', async (req, res) => {
     try {
-        const { channel_id, text } = req.body;
+        const { channel_id, text, image_url } = req.body;
         if (!sock) {
             return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
         }
@@ -151,8 +148,19 @@ app.post('/send', async (req, res) => {
             });
         }
 
-        console.log(`Sending message to newsletter JID: ${targetJid}`);
-        await sock.sendMessage(targetJid, { text: text });
+        console.log(`Sending message to newsletter JID: ${targetJid} (Has Image: ${!!image_url})`);
+
+        if (image_url && image_url.trim().length > 0) {
+            // Send Photo Message with Caption
+            await sock.sendMessage(targetJid, {
+                image: { url: image_url.trim() },
+                caption: text
+            });
+        } else {
+            // Send Text Message
+            await sock.sendMessage(targetJid, { text: text });
+        }
+
         res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
 
     } catch (error) {
