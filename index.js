@@ -1,8 +1,11 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, delay } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const app = express();
-app.use(express.json());
+
+// Increase JSON limits to allow uploading multiple High Quality Photos
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 let sock;
 let discoveredChannels = new Map();
@@ -21,11 +24,8 @@ async function syncKnownChannels() {
             if (meta && meta.id) {
                 discoveredChannels.set(meta.id, meta.name || code);
                 discoveredChannels.set(code, meta.id);
-                console.log(`✅ Auto-resolved ${code} => ${meta.id}`);
             }
-        } catch (err) {
-            console.log(`Notice resolving ${code}: ${err.message}`);
-        }
+        } catch (err) { }
     }
 }
 
@@ -63,10 +63,7 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Connected Successfully!');
             app.locals.qr = null;
-
-            setTimeout(() => {
-                syncKnownChannels();
-            }, 3000);
+            setTimeout(() => { syncKnownChannels(); }, 3000);
         }
     });
 }
@@ -76,13 +73,8 @@ connectToWhatsApp();
 async function getJidFromInvite(code) {
     try {
         let clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
-        if (clean.startsWith('120363')) {
-            return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
-        }
-
-        if (discoveredChannels.has(clean)) {
-            return discoveredChannels.get(clean);
-        }
+        if (clean.startsWith('120363')) return clean.endsWith('@newsletter') ? clean : `${clean}@newsletter`;
+        if (discoveredChannels.has(clean)) return discoveredChannels.get(clean);
 
         try {
             const res = await sock.newsletterMetadata('invite', clean);
@@ -91,23 +83,15 @@ async function getJidFromInvite(code) {
                 discoveredChannels.set(clean, res.id);
                 return res.id;
             }
-        } catch (err) {
-            console.log(`Invite metadata notice for ${clean}:`, err.message);
-        }
+        } catch (err) { }
 
         if (discoveredChannels.size > 0) {
             const keys = Array.from(discoveredChannels.keys()).filter(k => k.startsWith('120363'));
             if (keys.length > 0) return keys[0];
         }
-    } catch (err) {
-        console.error(`Invite resolution error for ${code}:`, err.message);
-    }
+    } catch (err) { }
     return null;
 }
-
-app.get('/', (req, res) => {
-    res.send('<h2>WhatsApp Channel Bridge Server is Running!</h2><p>Visit <a href="/qr">/qr</a> or <a href="/channels">/channels</a></p>');
-});
 
 app.get('/qr', async (req, res) => {
     if (app.locals.qr) {
@@ -118,50 +102,36 @@ app.get('/qr', async (req, res) => {
     }
 });
 
-app.get('/channels', async (req, res) => {
-    await syncKnownChannels();
-    const channels = Array.from(discoveredChannels.entries())
-        .filter(([id]) => id.startsWith('120363'))
-        .map(([id, name]) => ({ id, name }));
-
-    res.json({
-        status: 'success',
-        count: channels.length,
-        channels: channels
-    });
-});
-
-// Post to WhatsApp Channel Endpoint (Supports both Image + Caption & Text)
+// Powerful Mutliple Photos Base64 Sender API Endpoint
 app.post('/send', async (req, res) => {
     try {
-        const { channel_id, text, image_url } = req.body;
-        if (!sock) {
-            return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
-        }
+        const { channel_id, text, images } = req.body;
+        if (!sock) return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
 
         let targetJid = await getJidFromInvite(channel_id);
-
         if (!targetJid) {
-            return res.status(400).json({ 
-                status: 'error', 
-                error: `Could not resolve JID for '${channel_id}'. Please make sure WhatsApp socket is connected.` 
-            });
+            return res.status(400).json({ status: 'error', error: `Could not resolve JID` });
         }
 
-        console.log(`Sending message to newsletter JID: ${targetJid} (Has Image: ${!!image_url})`);
+        if (images && Array.isArray(images) && images.length > 0) {
+            console.log(`Sending Multiple (${images.length}) images to JID: ${targetJid}`);
+            
+            // First image comes with the Title + Details caption!
+            const mainBuffer = Buffer.from(images[0], 'base64');
+            await sock.sendMessage(targetJid, { image: mainBuffer, caption: text });
 
-        if (image_url && image_url.trim().length > 0) {
-            // Send Photo Message with Caption
-            await sock.sendMessage(targetJid, {
-                image: { url: image_url.trim() },
-                caption: text
-            });
+            // Next images will be pushed directly without text, creating a smooth visual album flow
+            for (let i = 1; i < images.length; i++) {
+                await delay(1200); // 1.2 second pause for Anti-Spam protection!
+                const buffer = Buffer.from(images[i], 'base64');
+                await sock.sendMessage(targetJid, { image: buffer });
+            }
         } else {
-            // Send Text Message
+            console.log(`Sending TEXT message to newsletter JID: ${targetJid}`);
             await sock.sendMessage(targetJid, { text: text });
         }
 
-        res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
+        res.json({ status: 'success', message: 'Posted Album to channel successfully!', jid: targetJid });
 
     } catch (error) {
         console.error('Send error:', error);
