@@ -22,7 +22,10 @@ const API_KEYS = process.env.API_KEYS
     : [];
 
 // একাধিক মডেলের লিস্ট গ্রহণ (কমা দিয়ে আলাদা করা)
-const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || "qwen3.5,glm-5.3-flash,deepseek-v4-flash")
+// অগ্রাধিকার ক্রমানুসারে সাজানো মডেলের তালিকা
+const DEFAULT_MODELS = "gemma4:31b,gpt-oss:120b,gpt-oss:20b,nemotron-3-nano:30b,nemotron-3-super,nemotron-3-ultra,qwen3.5,glm-5.3-flash,deepseek-v4-flash";
+
+const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODELS)
     .split(',')
     .map(m => m.trim())
     .filter(Boolean);
