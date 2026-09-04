@@ -11,19 +11,23 @@ let sock;
 let discoveredChannels = new Map();
 
 // ==================== কনফিগারেশন (Environment Variables) ====================
-// Render-এর Environment Variables থেকে ডেটা নেবে
 let ADMIN_NUMBER = process.env.ADMIN_NUMBER || "8801XXXXXXXXX@s.whatsapp.net";
 if (ADMIN_NUMBER && !ADMIN_NUMBER.endsWith('@s.whatsapp.net')) {
     ADMIN_NUMBER = ADMIN_NUMBER.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
 }
 
-// কমা দিয়ে আলাদা করা একাধিক এপিআই কি রিসিভ করবে (যেমন: key1,key2,key3)
+// একাধিক API Key গ্রহণ (কমা দিয়ে আলাদা করা)
 const API_KEYS = process.env.API_KEYS 
     ? process.env.API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-const LLM_API_URL = process.env.LLM_API_URL || "https://api.ollama.com/v1/chat/completions";
-const LLM_MODEL = process.env.LLM_MODEL || "llama3";
+// একাধিক মডেলের লিস্ট গ্রহণ (কমা দিয়ে আলাদা করা)
+const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || "qwen3.5,glm-5.3-flash,deepseek-v4-flash")
+    .split(',')
+    .map(m => m.trim())
+    .filter(Boolean);
+
+const LLM_API_URL = process.env.LLM_API_URL || "https://ollama.com/v1/chat/completions";
 
 // মেমোরি ও চ্যাট হিস্ট্রি ট্র্যাকিং
 const chatHistories = new Map();
@@ -49,7 +53,7 @@ function cleanHTML(html) {
 async function fetchLastTwoMonthsJobs() {
     console.log("🔄 গত ২ মাসের চাকরির সার্কুলার স্ক্র্যাপিং শুরু হচ্ছে...");
     const twoMonthsAgo = new Date();
-    twoMonthsAgo.setDate(twoMonthsAgo.getDate() - 60); // ৬০ দিন আগের তারিখ
+    twoMonthsAgo.setDate(twoMonthsAgo.getDate() - 60);
 
     let allJobs = [];
 
@@ -95,7 +99,7 @@ async function fetchLastTwoMonthsJobs() {
     }
 }
 
-// ==================== এআই লজিক ও রোটেশন (Fallback Loop) ====================
+// ==================== এআই লজিক (দ্বি-স্তরীয় Fallback লুপ: Key ➡️ Models) ====================
 async function getAIReply(userPhone, userMessage) {
     let jobsData = "";
     if (fs.existsSync('./jobs.json')) {
@@ -140,32 +144,45 @@ ${jobsData}
         return "API Key সেট করা হয়নি। অনুগ্রহ করে Render Environment Variables চেক করুন।";
     }
 
-    // একাধিক API Key দিয়ে Fallback রোটেশন
-    for (let i = 0; i < API_KEYS.length; i++) {
-        try {
-            const res = await fetch(LLM_API_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${API_KEYS[i]}`
-                },
-                body: JSON.stringify({
-                    model: LLM_MODEL,
-                    messages: messagesToSend,
-                    temperature: 0.2 // কম টেম্পারেচার দিলে উত্তর একদম পয়েন্ট টু পয়েন্ট হয়
-                })
-            });
+    // 🔥 দ্বি-স্তরীয় লুপ: প্রথমে Key লুপ, ভেতরে Model লুপ
+    for (let k = 0; k < API_KEYS.length; k++) {
+        const currentKey = API_KEYS[k];
 
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            const reply = data.choices[0].message.content.trim();
+        for (let m = 0; m < MODELS.length; m++) {
+            const currentModel = MODELS[m];
 
-            history.push({ role: "assistant", content: reply });
-            return reply;
+            try {
+                const res = await fetch(LLM_API_URL, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${currentKey}`
+                    },
+                    body: JSON.stringify({
+                        model: currentModel,
+                        messages: messagesToSend,
+                        temperature: 0.2
+                    })
+                });
 
-        } catch (error) {
-            console.log(`⚠️ API Key #${i + 1} সমস্যা করেছে (${error.message})। পরবর্তী কি দিয়ে চেষ্টা করা হচ্ছে...`);
+                if (!res.ok) {
+                    const errText = await res.text().catch(() => "");
+                    throw new Error(`Status ${res.status}: ${errText.slice(0, 80)}`);
+                }
+
+                const data = await res.json();
+                const reply = data.choices?.[0]?.message?.content?.trim();
+
+                if (reply) {
+                    history.push({ role: "assistant", content: reply });
+                    return reply; // সফল হলে উত্তর ফেরত পাঠাবে
+                }
+
+            } catch (error) {
+                console.log(`⚠️ Key #${k + 1}-এ মডেল '${currentModel}' সমস্যা করেছে (${error.message})। পরবর্তী মডেল ট্রাই করা হচ্ছে...`);
+            }
         }
+        console.log(`❌ Key #${k + 1}-এর সবগুলো মডেল ব্যর্থ হয়েছে। পরবর্তী API Key-তে যাওয়া হচ্ছে...`);
     }
 
     return "দুঃখিত, সংযোগে সমস্যা হচ্ছে। কিছুক্ষণ পর আবার চেষ্টা করুন।";
@@ -204,19 +221,17 @@ async function connectToWhatsApp() {
             const jid = msg.key?.remoteJid;
             if (!jid) continue;
 
-            // চ্যানেলের আইডি মনে রাখা
             if (jid.endsWith('@newsletter') || jid.startsWith('120363')) {
                 discoveredChannels.set(jid, jid);
                 continue;
             }
 
-            // গ্রুপ এবং স্ট্যাটাস ইগনোর করা
             if (jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
             if (!text.trim()) continue;
 
-            // ১. অটো-পজ লজিক (আপনি নিজে কোনো কাস্টমারকে উত্তর দিলে বট তার জন্য ২৪ ঘণ্টার জন্য বন্ধ হবে)
+            // অ্যাডমিন ইন্টারভেনশন ও অটো-পজ লজিক
             if (msg.key.fromMe) {
                 if (text.trim() === "#start") {
                     pausedUsers.delete(jid);
@@ -225,25 +240,23 @@ async function connectToWhatsApp() {
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                     await sock.sendMessage(jid, { text: "বট সাময়িকভাবে বন্ধ করা হলো।" });
                 } else {
-                    // নিজে সাধারণ মেসেজ লিখলেই অটোমেটিক পজ হবে
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                 }
                 continue;
             }
 
-            // ২. চেক করা কাস্টমার পজ লিস্টে আছে কিনা
             if (pausedUsers.has(jid)) {
                 if (Date.now() < pausedUsers.get(jid)) {
-                    continue; // আপনি হ্যান্ডেল করছেন, তাই বট রিপ্লাই দেবে না
+                    continue;
                 } else {
                     pausedUsers.delete(jid);
                 }
             }
 
-            // ৩. এআই দিয়ে সংক্ষিপ্ত উত্তর তৈরি
+            // এআই উত্তর তৈরি
             const aiResponse = await getAIReply(jid, text);
 
-            // ৪. পেমেন্ট ও অ্যাডমিন অ্যালার্ট
+            // পেমেন্ট সংক্রান্ত অ্যালার্ট
             if (aiResponse.includes("[ALERT_ADMIN]")) {
                 const cleanReply = aiResponse.replace("[ALERT_ADMIN]", "").trim();
                 await sock.sendMessage(jid, { text: cleanReply });
@@ -254,12 +267,10 @@ async function connectToWhatsApp() {
                     });
                 }
 
-                // অ্যালার্ট যাওয়ার পর বট ওই ইউজারের জন্য পজ হয়ে যাবে
                 pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                 continue;
             }
 
-            // সাধারণ সংক্ষিপ্ত উত্তর কাস্টমারকে পাঠানো
             await sock.sendMessage(jid, { text: aiResponse });
         }
     });
@@ -342,7 +353,6 @@ app.post('/send', async (req, res) => {
     }
 });
 
-// সার্ভার চালু হওয়ার সময় এবং প্রতি ১২ ঘণ্টায় একবার চাকরির ডাটা অটো স্ক্র্যাপ করবে
 fetchLastTwoMonthsJobs();
 setInterval(fetchLastTwoMonthsJobs, 12 * 60 * 60 * 1000);
 
