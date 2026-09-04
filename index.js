@@ -1,7 +1,8 @@
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, delay, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestWaWebVersion, delay, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
 const fs = require('fs');
+const pdfParse = require('pdf-parse');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -10,20 +11,18 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 let sock;
 let discoveredChannels = new Map();
 
-// ==================== কনফিগারেশন (Environment Variables) ====================
-let ADMIN_NUMBER = process.env.ADMIN_NUMBER || "8801XXXXXXXXX@s.whatsapp.net";
+// ==================== কনফিগারেশন ====================
+let ADMIN_NUMBER = process.env.ADMIN_NUMBER || "8801540503092@s.whatsapp.net";
 if (ADMIN_NUMBER && !ADMIN_NUMBER.endsWith('@s.whatsapp.net')) {
     ADMIN_NUMBER = ADMIN_NUMBER.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
 }
 
-// একাধিক API Key গ্রহণ (কমা দিয়ে আলাদা করা)
 const API_KEYS = process.env.API_KEYS 
     ? process.env.API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-// একাধিক মডেলের লিস্ট গ্রহণ (কমা দিয়ে আলাদা করা)
-// অগ্রাধিকার ক্রমানুসারে সাজানো মডেলের তালিকা
-const DEFAULT_MODELS = "gemma4:31b,gpt-oss:120b,gpt-oss:20b,nemotron-3-nano:30b,nemotron-3-super,nemotron-3-ultra,qwen3.5,glm-5.3-flash,deepseek-v4-flash";
+// ছবি পড়ার সুবিধার্থে ভিশন সমর্থিত মডেলগুলোকে শুরুতে রাখা হয়েছে
+const DEFAULT_MODELS = "qwen3.5,glm-5.3-flash,gemma4:31b,gpt-oss:120b,gpt-oss:20b,nemotron-3-super,deepseek-v4-flash";
 
 const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODELS)
     .split(',')
@@ -31,8 +30,8 @@ const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODEL
     .filter(Boolean);
 
 const LLM_API_URL = process.env.LLM_API_URL || "https://ollama.com/v1/chat/completions";
+const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
-// মেমোরি ও চ্যাট হিস্ট্রি ট্র্যাকিং
 const chatHistories = new Map();
 const pausedUsers = new Map();
 
@@ -42,7 +41,7 @@ const KNOWN_INVITES = [
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
-// ==================== গত ২ মাসের চাকরির ডাটা কালেকশন (Scraper) ====================
+// ==================== গত ২ মাসের সার্কুলার স্ক্র্যাপার ====================
 const JOB_SITES = [
     "https://bdgovtjob.net/wp-json/wp/v2/posts",
     "https://bdgovtnotice.com/wp-json/wp/v2/posts",
@@ -54,21 +53,18 @@ function cleanHTML(html) {
 }
 
 async function fetchLastTwoMonthsJobs() {
-    console.log("🔄 গত ২ মাসের চাকরির সার্কুলার স্ক্র্যাপিং শুরু হচ্ছে...");
+    console.log("🔄 সার্কুলার স্ক্র্যাপিং শুরু হচ্ছে...");
     const twoMonthsAgo = new Date();
     twoMonthsAgo.setDate(twoMonthsAgo.getDate() - 60);
 
     let allJobs = [];
-
     for (const site of JOB_SITES) {
         let page = 1;
         let keepFetching = true;
-
         while (keepFetching && page <= 5) {
             try {
                 const res = await fetch(`${site}?per_page=20&page=${page}`);
                 if (!res.ok) break;
-
                 const posts = await res.json();
                 if (!posts || posts.length === 0) break;
 
@@ -78,7 +74,6 @@ async function fetchLastTwoMonthsJobs() {
                         keepFetching = false;
                         break;
                     }
-
                     allJobs.push({
                         title: post.title.rendered,
                         date: post.date.split('T')[0],
@@ -88,45 +83,41 @@ async function fetchLastTwoMonthsJobs() {
                 }
                 page++;
             } catch (err) {
-                console.error(`Error fetching from ${site}:`, err.message);
                 break;
             }
         }
     }
-
     try {
         fs.writeFileSync('./jobs.json', JSON.stringify(allJobs, null, 2));
-        console.log(`✅ সফলভাবে মোট ${allJobs.length} টি চলতি সার্কুলার মেমরিতে সেভ করা হয়েছে!`);
-    } catch (err) {
-        console.error("Jobs file write error:", err);
-    }
+        console.log(`✅ ${allJobs.length} টি চলতি সার্কুলার লোড হয়েছে!`);
+    } catch (e) {}
 }
 
-// ==================== এআই লজিক (দ্বি-স্তরীয় Fallback লুপ: Key ➡️ Models) ====================
-async function getAIReply(userPhone, userMessage) {
+// ==================== এআই লজিক ও প্রম্পট ইঞ্জিনিয়ারিং ====================
+async function getAIReply(userPhone, userMessage, base64Image = null) {
     let jobsData = "";
     if (fs.existsSync('./jobs.json')) {
         try {
             const jobs = JSON.parse(fs.readFileSync('./jobs.json', 'utf-8'));
-            jobsData = jobs.slice(0, 25).map(j => `- ${j.title} (তারিখ: ${j.date})`).join("\n");
-        } catch (e) { }
+            jobsData = jobs.slice(0, 20).map(j => `- ${j.title} (${j.date})`).join("\n");
+        } catch (e) {}
     }
 
     const systemPrompt = `
-তুমি একজন প্রফেশনাল জব অ্যাপ্লিকেশান কাস্টমার সাপোর্ট এআই।
-কঠোর নিয়মাবলী:
-১. শুধুমাত্র যতটুকু জানতে চেয়েছে ঠিক ততটুকুই সংক্ষিপ্তভাবে উত্তর দিবে। কোনো অতিরিক্ত কথা, বাড়তি ভূমিকা বা অপ্রয়োজনীয় বাক্য লিখবে না।
-২. সার্ভিস চার্জ:
-   - সরকারি চাকরির আবেদন সার্ভিস চার্জ ৫০ টাকা।
-   - বেসরকারি চাকরির আবেদন সার্ভিস চার্জ ১০০ টাকা।
-   - কাস্টমার যদি শুধু বলে "সার্ভিস চার্জ কত?", আগের মেসেজের প্রসঙ্গ দেখে বুঝে নিবে সে কোন চাকরির কথা বলছে। যদি সরকারি হয় বলবে "৫০ টাকা", বেসরকারি হলে "১০০ টাকা"। স্পষ্ট না বুঝলে বলবে: "সরকারি ৫০ টাকা, বেসরকারি ১০০ টাকা।"
-৩. প্রয়োজনীয় ডকুমেন্টস:
-   - সিভি থাকলে সিভি দিলেই হবে।
-   - সিভি না থাকলে আগের কোনো অ্যাপ্লিকেন্ট কপি।
-   - একদম প্রথমবার আবেদন করলে: ভোটার আইডি/সনদ, ১ কপি পাসপোর্ট সাইজ ছবি এবং সাদা কাগজে স্বাক্ষরের স্পষ্ট ছবি।
-৪. কাস্টমার যদি জিজ্ঞেস করে "মানুষ নাকি বট?" বা "এত দ্রুত উত্তর দিচ্ছেন কীভাবে?": বলবে "আমি একটি কাস্টমার সার্ভিস এআই সহকারী।"
-৫. পেমেন্ট আলোচনা: কাস্টমার যদি বিকাশ/নগদ নম্বর চায় বা পেমেন্ট সংক্রান্ত তথ্য জানতে চায়, তবে উত্তরে বলবে "পেমেন্টের বিষয়ে আমাদের একজন টিম মেম্বার খুব শীঘ্রই আপনার সাথে যুক্ত হচ্ছেন।" এবং উত্তরের শেষে অবশ্যই [ALERT_ADMIN] ট্যাগটি যুক্ত করবে।
-৬. চলমান চাকরির তালিকা:
+তুমি একজন আন্তরিক, বন্ধুসুলভ জব অ্যাপ্লিকেশান অ্যাসিস্ট্যান্ট। কথাবার্তা খুব বেশি ফরমাল বা রোবটের মতো বলবে না, সম্পূর্ণ ক্যাজুয়াল ও সহজ বাংলা ভাষায় উত্তর দেবে (যেমন: "এটা তো অনলাইনে হবে না ভাই", "আমাদের অফিসে যাওয়া লাগবে না, আপনি তাদের অফিসে যাবেন")।
+
+গুরুত্বপূর্ণ নিয়মাবলী:
+১. সার্কুলার বিশ্লেষণ (ছবি বা ডকুমেন্টের ক্ষেত্রে):
+   - যদি নিয়োগটিতে "সরাসরি সাক্ষাৎকার / Walk-in Interview / সরাসরি যোগাযোগ" থাকে: পরিষ্কারভাবে বলবে— "এটা তো অনলাইনে আবেদন করা যাবে না। আপনাকে সরাসরি তাদের অফিসে গিয়ে ইন্টারভিউ দিতে হবে/কাগজপত্র জমা দিতে হবে।" এবং সংক্ষেপে তারিখ, সময়, স্থান ও কী কী কাগজপত্র লাগবে তা উল্লেখ করবে।
+   - যদি "ডাকযোগে বা কুরিয়ারে" পাঠানোর কথা থাকে: বলবে— "এটা আপনাকে ডাক বিভাগের/কুরিয়ারের মাধ্যমে পাঠাতে হবে। অনলাইন আবেদনের অপশন নাই।"
+   - যদি "অনলাইনে আবেদনযোগ্য" হয়: বলবে— "হ্যাঁ, এটা আমরা অনলাইনে আবেদন করে দিতে পারব।" এরপর প্রয়োজনীয় কাগজপত্র ও ফি জানতে চাইলে বলবে।
+২. "চাকরি দেওয়া" সংক্রান্ত প্রশ্ন: কেউ যদি বলে "আমাকে একটা চাকরি দেন / চাকরি পাওয়া যাবে?": বলবে— "আমরা চাকরি দেই না, আমরা চাকরির আবেদনের অনলাইন সার্ভিস প্রদান করি। আপনি আমাদের চলমান চাকরির তালিকা থেকে পছন্দ করলে আবেদন করে দিতে পারব।"
+৩. সার্ভিস চার্জ: সরকারি চাকরির অনলাইন আবেদন চার্জ ৫০ টাকা, বেসরকারি ১০০ টাকা। প্রসঙ্গ বুঝে সংক্ষেপে জানাবে।
+৪. কথাবার্তা শেষ বা কাঙ্ক্ষিত চাকরি না থাকলে: কাস্টমারকে বলবে— "আপনি আমাদের হোয়াটসঅ্যাপ চ্যানেলে জয়েন হয়ে থাইকেন। ওইখানে সব চলমান নিয়োগ প্রতিনিয়ত আপলোড করা হয়, মাঝেমধ্যে চেক করবেন: ${CHANNEL_LINK}"
+৫. পেমেন্ট আলোচনা: কাস্টমার বিকাশ/নগদ নম্বর চাইলে বা টাকা পাঠাতে চাইলে বলবে— "পেমেন্টের বিষয়ে আমাদের একজন টিম মেম্বার খুব শীঘ্রই নক দিচ্ছেন।" এবং মেসেজের শেষে [ALERT_ADMIN] লিখবে।
+৬. অতিরিক্ত কোনো ভূমিকা বা অনাবশ্যক বড় লেকচার দেবে না। উত্তর হবে খুবই সংক্ষিপ্ত ও পয়েন্ট-টু-পয়েন্ট।
+
+চলমান চাকরির কিছু তালিকা:
 ${jobsData}
 `;
 
@@ -134,8 +125,19 @@ ${jobsData}
         chatHistories.set(userPhone, []);
     }
     const history = chatHistories.get(userPhone);
-    history.push({ role: "user", content: userMessage });
 
+    // মেসেজ কনটেন্ট প্রস্তুত করা (ছবি থাকলে ভিশন ফরম্যাটে যাবে)
+    let currentContent;
+    if (base64Image) {
+        currentContent = [
+            { type: "text", text: userMessage || "এই সার্কুলারটি দেখে বলো এটা কি অনলাইনে আবেদন করা যাবে নাকি সরাসরি অফিস বা ডাকযোগে যেতে হবে? প্রয়োজনীয় তথ্য সংক্ষেপে বলো।" },
+            { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
+        ];
+    } else {
+        currentContent = userMessage;
+    }
+
+    history.push({ role: "user", content: currentContent });
     if (history.length > 6) history.shift();
 
     const messagesToSend = [
@@ -143,17 +145,13 @@ ${jobsData}
         ...history
     ];
 
-    if (API_KEYS.length === 0) {
-        return "API Key সেট করা হয়নি। অনুগ্রহ করে Render Environment Variables চেক করুন।";
-    }
+    if (API_KEYS.length === 0) return "API Key পাওয়া যায়নি। Render চেক করুন।";
 
-    // 🔥 দ্বি-স্তরীয় লুপ: প্রথমে Key লুপ, ভেতরে Model লুপ
+    // দ্বি-স্তরীয় ফলব্যাক লুপ (Key ➡️ Model)
     for (let k = 0; k < API_KEYS.length; k++) {
         const currentKey = API_KEYS[k];
-
         for (let m = 0; m < MODELS.length; m++) {
             const currentModel = MODELS[m];
-
             try {
                 const res = await fetch(LLM_API_URL, {
                     method: "POST",
@@ -168,30 +166,23 @@ ${jobsData}
                     })
                 });
 
-                if (!res.ok) {
-                    const errText = await res.text().catch(() => "");
-                    throw new Error(`Status ${res.status}: ${errText.slice(0, 80)}`);
-                }
-
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
                 const reply = data.choices?.[0]?.message?.content?.trim();
 
                 if (reply) {
                     history.push({ role: "assistant", content: reply });
-                    return reply; // সফল হলে উত্তর ফেরত পাঠাবে
+                    return reply;
                 }
-
-            } catch (error) {
-                console.log(`⚠️ Key #${k + 1}-এ মডেল '${currentModel}' সমস্যা করেছে (${error.message})। পরবর্তী মডেল ট্রাই করা হচ্ছে...`);
+            } catch (err) {
+                console.log(`⚠️ Key #${k+1} এ মডেল ${currentModel} ফেইল করেছে। পরবর্তী চেষ্টা করা হচ্ছে...`);
             }
         }
-        console.log(`❌ Key #${k + 1}-এর সবগুলো মডেল ব্যর্থ হয়েছে। পরবর্তী API Key-তে যাওয়া হচ্ছে...`);
     }
-
-    return "দুঃখিত, সংযোগে সমস্যা হচ্ছে। কিছুক্ষণ পর আবার চেষ্টা করুন।";
+    return "দুঃখিত, বর্তমানে সংযোগে সমস্যা হচ্ছে। একটু পর আবার চেষ্টা করুন।";
 }
 
-// ==================== হোয়াটসঅ্যাপ সংযোগ ও বার্তা হ্যান্ডলিং ====================
+// ==================== হোয়াটসঅ্যাপ ইভেন্ট হ্যান্ডলার ====================
 async function syncKnownChannels() {
     if (!sock) return;
     for (const code of KNOWN_INVITES) {
@@ -201,7 +192,7 @@ async function syncKnownChannels() {
                 discoveredChannels.set(meta.id, meta.name || code);
                 discoveredChannels.set(code, meta.id);
             }
-        } catch (err) { }
+        } catch (err) {}
     }
 }
 
@@ -228,48 +219,67 @@ async function connectToWhatsApp() {
                 discoveredChannels.set(jid, jid);
                 continue;
             }
-
             if (jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
 
-            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-            if (!text.trim()) continue;
+            let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
+            let base64Image = null;
 
-            // অ্যাডমিন ইন্টারভেনশন ও অটো-পজ লজিক
+            // ছবি ডাউনলোড ও হ্যান্ডলিং
+            if (msg.message?.imageMessage) {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    base64Image = buffer.toString('base64');
+                } catch (e) {
+                    console.error("Image download error:", e);
+                }
+            }
+
+            // পিডিএফ ডাউনলোড ও টেক্সট কনভার্ট
+            if (msg.message?.documentMessage && msg.message.documentMessage.mimetype === 'application/pdf') {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    const pdfData = await pdfParse(buffer);
+                    text = `[পিডিএফ সার্কুলার ফাইল থেকে প্রাপ্ত টেক্সট]:\n${pdfData.text.slice(0, 3000)}\n\nকাস্টমারের প্রশ্ন: ${text || "এই নিয়োগ সম্পর্কে বিস্তারিত ও আবেদনের নিয়ম জানাও।"}`;
+                } catch (e) {
+                    console.error("PDF parse error:", e);
+                }
+            }
+
+            if (!text.trim() && !base64Image) continue;
+
+            // আপনি নিজে উত্তর দিলে ২৪ ঘণ্টার জন্য অটো-পজ হবে
             if (msg.key.fromMe) {
                 if (text.trim() === "#start") {
                     pausedUsers.delete(jid);
-                    await sock.sendMessage(jid, { text: "বট পুনরায় চালু করা হয়েছে।" });
+                    await sock.sendMessage(jid, { text: "বট চালু করা হয়েছে।" });
                 } else if (text.trim() === "#stop") {
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
-                    await sock.sendMessage(jid, { text: "বট সাময়িকভাবে বন্ধ করা হলো।" });
+                    await sock.sendMessage(jid, { text: "বট বন্ধ করা হলো।" });
                 } else {
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                 }
                 continue;
             }
 
+            // পজ লিস্ট চেক
             if (pausedUsers.has(jid)) {
-                if (Date.now() < pausedUsers.get(jid)) {
-                    continue;
-                } else {
-                    pausedUsers.delete(jid);
-                }
+                if (Date.now() < pausedUsers.get(jid)) continue;
+                pausedUsers.delete(jid);
             }
 
-            // এআই উত্তর তৈরি
-            const aiResponse = await getAIReply(jid, text);
+            // এআই রিপ্লাই তৈরি
+            const aiResponse = await getAIReply(jid, text, base64Image);
 
-            // পেমেন্ট সংক্রান্ত অ্যালার্ট
+            // পেমেন্ট ও অ্যাডমিন অ্যালার্ট
             if (aiResponse.includes("[ALERT_ADMIN]")) {
                 const cleanReply = aiResponse.replace("[ALERT_ADMIN]", "").trim();
                 await sock.sendMessage(jid, { text: cleanReply });
 
                 if (ADMIN_NUMBER && ADMIN_NUMBER.includes("@s.whatsapp.net")) {
                     await sock.sendMessage(ADMIN_NUMBER, {
-                        text: `⚠️ [পেমেন্ট অ্যালার্ট] কাস্টমার: ${jid.split('@')[0]}\nপেমেন্ট বা গুরুত্বপূর্ণ বিষয়ে কথা বলতে চাচ্ছে। অনুগ্রহ করে চ্যাটে নজর দিন!`
+                        text: `⚠️ [পেমেন্ট অ্যালার্ট] কাস্টমার: ${jid.split('@')[0]}\nপেমেন্ট করতে চাচ্ছে। চ্যাটে নজর দিন!`
                     });
                 }
-
                 pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                 continue;
             }
@@ -283,7 +293,6 @@ async function connectToWhatsApp() {
         if (qr) app.locals.qr = qr;
 
         if (connection === 'close') {
-            console.log('Reconnecting WhatsApp...');
             connectToWhatsApp();
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Connected Successfully!');
@@ -295,7 +304,7 @@ async function connectToWhatsApp() {
 
 connectToWhatsApp();
 
-// ==================== আগের চ্যানেল পোস্ট ও QR কোড API ====================
+// ==================== চ্যানেল পোস্ট API ও QR কোড ====================
 async function getJidFromInvite(code) {
     try {
         let clean = code.replace('https://whatsapp.com/channel/', '').replace('@newsletter', '').trim();
@@ -309,13 +318,13 @@ async function getJidFromInvite(code) {
                 discoveredChannels.set(clean, res.id);
                 return res.id;
             }
-        } catch (err) { }
+        } catch (err) {}
 
         if (discoveredChannels.size > 0) {
             const keys = Array.from(discoveredChannels.keys()).filter(k => k.startsWith('120363'));
             if (keys.length > 0) return keys[0];
         }
-    } catch (err) { }
+    } catch (err) {}
     return null;
 }
 
@@ -349,9 +358,8 @@ app.post('/send', async (req, res) => {
             await sock.sendMessage(targetJid, { text: text });
         }
 
-        res.json({ status: 'success', message: 'Posted Album to channel successfully!', jid: targetJid });
+        res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
     } catch (error) {
-        console.error('Send error:', error);
         res.status(500).json({ status: 'error', error: error.message });
     }
 });
