@@ -21,9 +21,7 @@ const API_KEYS = process.env.API_KEYS
     ? process.env.API_KEYS.split(',').map(k => k.trim()).filter(Boolean)
     : [];
 
-// ছবি পড়ার সুবিধার্থে ভিশন সমর্থিত মডেলগুলোকে শুরুতে রাখা হয়েছে
 const DEFAULT_MODELS = "qwen3.5,glm-5.3-flash,gemma4:31b,gpt-oss:120b,gpt-oss:20b,nemotron-3-super,deepseek-v4-flash";
-
 const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODELS)
     .split(',')
     .map(m => m.trim())
@@ -32,8 +30,11 @@ const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODEL
 const LLM_API_URL = process.env.LLM_API_URL || "https://ollama.com/v1/chat/completions";
 const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
+// ট্র্যাকিং
 const chatHistories = new Map();
 const pausedUsers = new Map();
+const channelSentUsers = new Set();
+const botSentMessageIds = new Set();
 
 const KNOWN_INVITES = [
     "0029VbCsrU6IHphJ1G2Ctv0X",
@@ -41,7 +42,72 @@ const KNOWN_INVITES = [
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
-// ==================== গত ২ মাসের সার্কুলার স্ক্র্যাপার ====================
+// ==================== history.json ডায়নামিক মেমোরি হ্যান্ডলার ====================
+const HISTORY_FILE = './history.json';
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
+
+function getCustomerMemory(userPhone) {
+    if (!fs.existsSync(HISTORY_FILE)) return null;
+    try {
+        const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+        return data[userPhone] || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false) {
+    let data = {};
+    if (fs.existsSync(HISTORY_FILE)) {
+        try {
+            data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+        } catch (e) {
+            data = {};
+        }
+    }
+
+    const now = Date.now();
+
+    for (const [phone, profile] of Object.entries(data)) {
+        if (profile.last_active && (now - profile.last_active > SIX_MONTHS_MS)) {
+            delete data[phone];
+        }
+    }
+
+    const current = data[userPhone] || {
+        last_active: now,
+        interests: [],
+        docs_provided: false,
+        notes: ""
+    };
+
+    current.last_active = now;
+
+    if (hasMedia || profileUpdate.docs_provided === true) {
+        current.docs_provided = true;
+    }
+
+    if (profileUpdate.interest && typeof profileUpdate.interest === 'string') {
+        const newInt = profileUpdate.interest.trim();
+        if (newInt && !current.interests.includes(newInt)) {
+            current.interests.push(newInt);
+        }
+    }
+
+    if (profileUpdate.note) {
+        current.notes = current.notes ? `${current.notes}; ${profileUpdate.note}` : profileUpdate.note;
+    }
+
+    data[userPhone] = current;
+
+    try {
+        fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error("history.json write error:", e);
+    }
+}
+
+// ==================== সার্কুলার স্ক্র্যাপার ====================
 const JOB_SITES = [
     "https://bdgovtjob.net/wp-json/wp/v2/posts",
     "https://bdgovtnotice.com/wp-json/wp/v2/posts",
@@ -93,8 +159,8 @@ async function fetchLastTwoMonthsJobs() {
     } catch (e) {}
 }
 
-// ==================== এআই লজিক ও প্রম্পট ইঞ্জিনিয়ারিং ====================
-async function getAIReply(userPhone, userMessage, base64Image = null) {
+// ==================== এআই লজিক ও প্রম্পট (সহজ, সুন্দর ও মার্জিত টোন) ====================
+async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia = false) {
     let jobsData = "";
     if (fs.existsSync('./jobs.json')) {
         try {
@@ -103,21 +169,42 @@ async function getAIReply(userPhone, userMessage, base64Image = null) {
         } catch (e) {}
     }
 
+    const hasChannelLinkAlready = channelSentUsers.has(userPhone);
+    const userMemory = getCustomerMemory(userPhone);
+
+    let memoryContext = "";
+    if (userMemory) {
+        memoryContext = `
+[কাস্টমারের পূর্বের প্রোফাইল ও তথ্য]:
+- পছন্দ বা আগ্রহ: ${userMemory.interests?.length > 0 ? userMemory.interests.join(", ") : "জানা নেই"}
+- প্রয়োজনীয় কাগজপত্র পূর্বে জমা দেওয়া আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, জমা দেওয়া আছে (নতুন করে চাইবে না)" : "না"}
+- পূর্বের অন্যান্য নোট: ${userMemory.notes || "নাই"}
+`;
+    }
+
     const systemPrompt = `
-তুমি একজন আন্তরিক, বন্ধুসুলভ জব অ্যাপ্লিকেশান অ্যাসিস্ট্যান্ট। কথাবার্তা খুব বেশি ফরমাল বা রোবটের মতো বলবে না, সম্পূর্ণ ক্যাজুয়াল ও সহজ বাংলা ভাষায় উত্তর দেবে (যেমন: "এটা তো অনলাইনে হবে না ভাই", "আমাদের অফিসে যাওয়া লাগবে না, আপনি তাদের অফিসে যাবেন")।
+তুমি একজন আন্তরিক, বন্ধুসুলভ এবং নির্ভরযোগ্য চাকরির অনলাইন আবেদন সহকারী। তোমার ভাষা হবে অত্যন্ত সহজ-সরল, মার্জিত, প্রাসঙ্গিক এবং ১ থেকে ২ লাইনের সংক্ষিপ্ত কিন্তু সম্পূর্ণ।
 
-গুরুত্বপূর্ণ নিয়মাবলী:
-১. সার্কুলার বিশ্লেষণ (ছবি বা ডকুমেন্টের ক্ষেত্রে):
-   - যদি নিয়োগটিতে "সরাসরি সাক্ষাৎকার / Walk-in Interview / সরাসরি যোগাযোগ" থাকে: পরিষ্কারভাবে বলবে— "এটা তো অনলাইনে আবেদন করা যাবে না। আপনাকে সরাসরি তাদের অফিসে গিয়ে ইন্টারভিউ দিতে হবে/কাগজপত্র জমা দিতে হবে।" এবং সংক্ষেপে তারিখ, সময়, স্থান ও কী কী কাগজপত্র লাগবে তা উল্লেখ করবে।
-   - যদি "ডাকযোগে বা কুরিয়ারে" পাঠানোর কথা থাকে: বলবে— "এটা আপনাকে ডাক বিভাগের/কুরিয়ারের মাধ্যমে পাঠাতে হবে। অনলাইন আবেদনের অপশন নাই।"
-   - যদি "অনলাইনে আবেদনযোগ্য" হয়: বলবে— "হ্যাঁ, এটা আমরা অনলাইনে আবেদন করে দিতে পারব।" এরপর প্রয়োজনীয় কাগজপত্র ও ফি জানতে চাইলে বলবে।
-২. "চাকরি দেওয়া" সংক্রান্ত প্রশ্ন: কেউ যদি বলে "আমাকে একটা চাকরি দেন / চাকরি পাওয়া যাবে?": বলবে— "আমরা চাকরি দেই না, আমরা চাকরির আবেদনের অনলাইন সার্ভিস প্রদান করি। আপনি আমাদের চলমান চাকরির তালিকা থেকে পছন্দ করলে আবেদন করে দিতে পারব।"
-৩. সার্ভিস চার্জ: সরকারি চাকরির অনলাইন আবেদন চার্জ ৫০ টাকা, বেসরকারি ১০০ টাকা। প্রসঙ্গ বুঝে সংক্ষেপে জানাবে।
-৪. কথাবার্তা শেষ বা কাঙ্ক্ষিত চাকরি না থাকলে: কাস্টমারকে বলবে— "আপনি আমাদের হোয়াটসঅ্যাপ চ্যানেলে জয়েন হয়ে থাইকেন। ওইখানে সব চলমান নিয়োগ প্রতিনিয়ত আপলোড করা হয়, মাঝেমধ্যে চেক করবেন: ${CHANNEL_LINK}"
-৫. পেমেন্ট আলোচনা: কাস্টমার বিকাশ/নগদ নম্বর চাইলে বা টাকা পাঠাতে চাইলে বলবে— "পেমেন্টের বিষয়ে আমাদের একজন টিম মেম্বার খুব শীঘ্রই নক দিচ্ছেন।" এবং মেসেজের শেষে [ALERT_ADMIN] লিখবে।
-৬. অতিরিক্ত কোনো ভূমিকা বা অনাবশ্যক বড় লেকচার দেবে না। উত্তর হবে খুবই সংক্ষিপ্ত ও পয়েন্ট-টু-পয়েন্ট।
+${memoryContext}
 
-চলমান চাকরির কিছু তালিকা:
+নির্দেশনা ও নিয়মাবলী:
+১. সহজ ও প্রাসঙ্গিক ডেলিভারি: কোনো কাঠখোট্টা বা রোবটের মতো বইয়ের ভাষা ব্যবহার করবে না। কাস্টমার ঠিক যে বিষয়ে প্রশ্ন করেছে, অপ্রাসঙ্গিক কোনো কথা না বাড়িয়ে মিষ্টি ও সহজ ভাষায় উত্তর দাও।
+২. বাংলিশ বোঝা: কাস্টমার বাংলিশে লিখলে তা বুঝে বাংলায় স্বাভাবিক ও প্রাঞ্জল উত্তর দেবে।
+৩. কাগজপত্র হ্যান্ডলিং: কাস্টমার যদি পূর্বে কাগজপত্র জমা দিয়ে থাকে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তবে তার কাছে আর নতুন করে কাগজপত্র চাইবে না। শুধু বলবে কোন পদের জন্য আবেদন করতে চায়।
+৪. সার্কুলার যাচাই:
+   - সরাসরি অফিসে যাওয়ার হলে: "এটা তো অনলাইনে আবেদন করা যাবে না ভাই, সরাসরি তাদের অফিসে গিয়ে ইন্টারভিউ দিতে হবে/কাগজপত্র জমা দিতে হবে।"
+   - ডাকযোগে পাঠানোর হলে: "এটা অনলাইনে আবেদন করা যাবে না ভাই, ডাক বিভাগের মাধ্যমে পাঠাতে হবে।"
+   - অনলাইনে আবেদনযোগ্য হলে: "হ্যাঁ, এটা আমরা অনলাইনে আবেদন করে দিতে পারব।"
+৫. সার্ভিস চার্জ: সরকারি চাকরির অনলাইন আবেদন ফি ৫০ টাকা এবং বেসরকারি চাকরির জন্য ১০০ টাকা।
+৬. কাঙ্ক্ষিত চাকরি না থাকলে: "দুঃখিত ভাই, এই নিয়োগটি বর্তমানে আমাদের তালিকায় নাই।"
+${!hasChannelLinkAlready ? `৭. কথা শেষ হলে বা চাকরি না থাকলে একবার চ্যানেলে যুক্ত হতে বলবে: "${CHANNEL_LINK}"` : `৭. চ্যানেলের লিংক পূর্বে দেওয়া হয়ে গেছে, তাই নতুন করে লিংক দিবে না।`}
+৮. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের একজন প্রতিনিধি খুব শীঘ্রই আপনার সাথে যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
+
+৯. মেমোরি আপডেট:
+কথোপকথন থেকে কাস্টমারের যেকোনো নতুন আগ্রহ (যেকোনো কাজের ধরন, শিক্ষাগত যোগ্যতা, জেলা ইত্যাদি) বা কাগজপত্র সম্পর্কিত নতুন তথ্য পেলে উত্তরের শেষে লিখবে:
+[PROFILE_UPDATE: {"interest": "কাস্টমারের আগ্রহ", "docs_provided": true/false, "note": "সংক্ষিপ্ত তথ্য"}]
+
+চলতি সার্কুলার:
 ${jobsData}
 `;
 
@@ -126,11 +213,10 @@ ${jobsData}
     }
     const history = chatHistories.get(userPhone);
 
-    // মেসেজ কনটেন্ট প্রস্তুত করা (ছবি থাকলে ভিশন ফরম্যাটে যাবে)
     let currentContent;
     if (base64Image) {
         currentContent = [
-            { type: "text", text: userMessage || "এই সার্কুলারটি দেখে বলো এটা কি অনলাইনে আবেদন করা যাবে নাকি সরাসরি অফিস বা ডাকযোগে যেতে হবে? প্রয়োজনীয় তথ্য সংক্ষেপে বলো।" },
+            { type: "text", text: userMessage || "সার্কুলারটি দেখে ১-২ লাইনে সহজ করে বলো এটা অনলাইনে আবেদন করা যাবে নাকি সরাসরি অফিসে/ডাকযোগে যেতে হবে?" },
             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
         ];
     } else {
@@ -138,7 +224,7 @@ ${jobsData}
     }
 
     history.push({ role: "user", content: currentContent });
-    if (history.length > 6) history.shift();
+    if (history.length > 8) history.shift();
 
     const messagesToSend = [
         { role: "system", content: systemPrompt },
@@ -147,7 +233,6 @@ ${jobsData}
 
     if (API_KEYS.length === 0) return "API Key পাওয়া যায়নি। Render চেক করুন।";
 
-    // দ্বি-স্তরীয় ফলব্যাক লুপ (Key ➡️ Model)
     for (let k = 0; k < API_KEYS.length; k++) {
         const currentKey = API_KEYS[k];
         for (let m = 0; m < MODELS.length; m++) {
@@ -168,21 +253,33 @@ ${jobsData}
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                const reply = data.choices?.[0]?.message?.content?.trim();
+                let reply = data.choices?.[0]?.message?.content?.trim();
 
                 if (reply) {
+                    const profileMatch = reply.match(/\[PROFILE_UPDATE:\s*({.*?})\]/s);
+                    if (profileMatch) {
+                        try {
+                            const updateObj = JSON.parse(profileMatch[1]);
+                            saveDynamicMemory(userPhone, updateObj, hasMedia);
+                        } catch (e) {}
+                        reply = reply.replace(/\[PROFILE_UPDATE:\s*({.*?})\]/s, '').trim();
+                    } else if (hasMedia) {
+                        saveDynamicMemory(userPhone, {}, true);
+                    }
+
                     history.push({ role: "assistant", content: reply });
+                    if (reply.includes(CHANNEL_LINK)) {
+                        channelSentUsers.add(userPhone);
+                    }
                     return reply;
                 }
-            } catch (err) {
-                console.log(`⚠️ Key #${k+1} এ মডেল ${currentModel} ফেইল করেছে। পরবর্তী চেষ্টা করা হচ্ছে...`);
-            }
+            } catch (err) {}
         }
     }
-    return "দুঃখিত, বর্তমানে সংযোগে সমস্যা হচ্ছে। একটু পর আবার চেষ্টা করুন।";
+    return "সংযোগের সমস্যা হচ্ছে ভাই, একটু পর মেসেজ দিন।";
 }
 
-// ==================== হোয়াটসঅ্যাপ ইভেন্ট হ্যান্ডলার ====================
+// ==================== হোয়াটসঅ্যাপ কানেকশন ও ইভেন্ট ====================
 async function syncKnownChannels() {
     if (!sock) return;
     for (const code of KNOWN_INVITES) {
@@ -208,11 +305,30 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
+    // কল আসলে অটো মেসেজ পাঠানো
+    sock.ev.on('call', async (calls) => {
+        for (const call of calls) {
+            if (call.status === 'offer') {
+                const callerJid = call.from;
+                try {
+                    await sock.sendPresenceUpdate('composing', callerJid);
+                    await delay(1500);
+                } catch (e) {}
+                const sentMsg = await sock.sendMessage(callerJid, {
+                    text: "দয়া করে কল না দিয়ে আপনার বিষয়টি মেসেজে লিখে জানান ভাই, আমরা মেসেজেই সাহায্য করব।"
+                });
+                if (sentMsg?.key?.id) botSentMessageIds.add(sentMsg.key.id);
+            }
+        }
+    });
+
+    // মেসেজ রিসিভ হ্যান্ডলার
     sock.ev.on('messages.upsert', async (m) => {
         if (!m || !m.messages) return;
 
         for (const msg of m.messages) {
             const jid = msg.key?.remoteJid;
+            const msgId = msg.key?.id;
             if (!jid) continue;
 
             if (jid.endsWith('@newsletter') || jid.startsWith('120363')) {
@@ -221,59 +337,72 @@ async function connectToWhatsApp() {
             }
             if (jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
 
-            let text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
-            let base64Image = null;
-
-            // ছবি ডাউনলোড ও হ্যান্ডলিং
-            if (msg.message?.imageMessage) {
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    base64Image = buffer.toString('base64');
-                } catch (e) {
-                    console.error("Image download error:", e);
-                }
+            if (botSentMessageIds.has(msgId)) {
+                botSentMessageIds.delete(msgId);
+                continue;
             }
 
-            // পিডিএফ ডাউনলোড ও টেক্সট কনভার্ট
-            if (msg.message?.documentMessage && msg.message.documentMessage.mimetype === 'application/pdf') {
-                try {
-                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                    const pdfData = await pdfParse(buffer);
-                    text = `[পিডিএফ সার্কুলার ফাইল থেকে প্রাপ্ত টেক্সট]:\n${pdfData.text.slice(0, 3000)}\n\nকাস্টমারের প্রশ্ন: ${text || "এই নিয়োগ সম্পর্কে বিস্তারিত ও আবেদনের নিয়ম জানাও।"}`;
-                } catch (e) {
-                    console.error("PDF parse error:", e);
-                }
-            }
+            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
-            if (!text.trim() && !base64Image) continue;
-
-            // আপনি নিজে উত্তর দিলে ২৪ ঘণ্টার জন্য অটো-পজ হবে
+            // আপনি নিজে মোবাইল থেকে উত্তর দিলে ২৪ ঘণ্টার জন্য অটো-পজ
             if (msg.key.fromMe) {
                 if (text.trim() === "#start") {
                     pausedUsers.delete(jid);
-                    await sock.sendMessage(jid, { text: "বট চালু করা হয়েছে।" });
+                    const sent = await sock.sendMessage(jid, { text: "বট চালু করা হয়েছে।" });
+                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                 } else if (text.trim() === "#stop") {
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
-                    await sock.sendMessage(jid, { text: "বট বন্ধ করা হলো।" });
+                    const sent = await sock.sendMessage(jid, { text: "বট বন্ধ করা হলো।" });
+                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                 } else {
                     pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
                 }
                 continue;
             }
 
-            // পজ লিস্ট চেক
             if (pausedUsers.has(jid)) {
                 if (Date.now() < pausedUsers.get(jid)) continue;
                 pausedUsers.delete(jid);
             }
 
-            // এআই রিপ্লাই তৈরি
-            const aiResponse = await getAIReply(jid, text, base64Image);
+            let base64Image = null;
+            let hasMedia = false;
 
-            // পেমেন্ট ও অ্যাডমিন অ্যালার্ট
+            if (msg.message?.imageMessage) {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    base64Image = buffer.toString('base64');
+                    hasMedia = true;
+                } catch (e) {}
+            }
+
+            if (msg.message?.documentMessage && msg.message.documentMessage.mimetype === 'application/pdf') {
+                try {
+                    const buffer = await downloadMediaMessage(msg, 'buffer', {});
+                    const pdfData = await pdfParse(buffer);
+                    text = `[পিডিএফ সার্কুলার টেক্সট]:\n${pdfData.text.slice(0, 2000)}\n\nকাস্টমার: ${text || "আবেদনের নিয়ম জানাও।"}`;
+                    hasMedia = true;
+                } catch (e) {}
+            }
+
+            if (!text.trim() && !base64Image) continue;
+
+            // 🟢 হিউম্যান টাচ: কাস্টমারের চ্যাটে "typing..." দেখানো
+            try {
+                await sock.sendPresenceUpdate('composing', jid);
+            } catch (e) {}
+
+            // এআই উত্তর তৈরি
+            const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
+
+            // 🟢 ২ থেকে ২.৫ সেকেন্ডের স্বাভাবিক মানুষের মতো বিরতি (Human-like delay)
+            await delay(2200);
+
+            // পেমেন্ট সংক্রান্ত অ্যালার্ট
             if (aiResponse.includes("[ALERT_ADMIN]")) {
                 const cleanReply = aiResponse.replace("[ALERT_ADMIN]", "").trim();
-                await sock.sendMessage(jid, { text: cleanReply });
+                const sent1 = await sock.sendMessage(jid, { text: cleanReply });
+                if (sent1?.key?.id) botSentMessageIds.add(sent1.key.id);
 
                 if (ADMIN_NUMBER && ADMIN_NUMBER.includes("@s.whatsapp.net")) {
                     await sock.sendMessage(ADMIN_NUMBER, {
@@ -284,7 +413,14 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            await sock.sendMessage(jid, { text: aiResponse });
+            // কাস্টমারকে সুন্দরভাবে মেসেজ পাঠানো
+            const sent = await sock.sendMessage(jid, { text: aiResponse });
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+
+            // টাইপিং বন্ধ করা
+            try {
+                await sock.sendPresenceUpdate('paused', jid);
+            } catch (e) {}
         }
     });
 
