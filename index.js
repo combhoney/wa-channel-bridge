@@ -42,6 +42,41 @@ const KNOWN_INVITES = [
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
+// ==================== ChatFilter.json হ্যান্ডলার (#Stop / #Start) ====================
+const CHAT_FILTER_FILE = './ChatFilter.json';
+
+function getStoppedUsersList() {
+    if (!fs.existsSync(CHAT_FILTER_FILE)) return new Set();
+    try {
+        const raw = fs.readFileSync(CHAT_FILTER_FILE, 'utf-8');
+        const data = JSON.parse(raw);
+        return new Set(Array.isArray(data) ? data : []);
+    } catch (e) {
+        return new Set();
+    }
+}
+
+function updateChatFilter(jid, action) {
+    const list = getStoppedUsersList();
+    if (action === 'stop') {
+        list.add(jid);
+    } else if (action === 'start') {
+        list.delete(jid);
+    }
+
+    try {
+        fs.writeFileSync(CHAT_FILTER_FILE, JSON.stringify(Array.from(list), null, 2));
+        console.log(`📁 ChatFilter.json আপডেট হয়েছে: ${jid} -> ${action}`);
+    } catch (e) {
+        console.error("ChatFilter.json write error:", e);
+    }
+}
+
+function isChatFiltered(jid) {
+    const list = getStoppedUsersList();
+    return list.has(jid);
+}
+
 // ==================== history.json ডায়নামিক মেমোরি হ্যান্ডলার ====================
 const HISTORY_FILE = './history.json';
 const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
@@ -159,7 +194,7 @@ async function fetchLastTwoMonthsJobs() {
     } catch (e) {}
 }
 
-// ==================== এআই লজিক ও প্রম্পট (সহজ, সুন্দর ও মার্জিত টোন) ====================
+// ==================== এআই লজিক ও প্রম্পট ====================
 async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia = false) {
     let jobsData = "";
     if (fs.existsSync('./jobs.json')) {
@@ -183,12 +218,12 @@ async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia =
     }
 
     const systemPrompt = `
-তুমি একজন আন্তরিক, বন্ধুসুলভ এবং নির্ভরযোগ্য চাকরির অনলাইন আবেদন সহকারী। তোমার ভাষা হবে অত্যন্ত সহজ-সরল, মার্জিত, প্রাসঙ্গিক এবং ১ থেকে ২ লাইনের সংক্ষিপ্ত কিন্তু সম্পূর্ণ।
+তুমি একজন আন্তরিক, বন্ধুসুলভ চাকরির অনলাইন আবেদন সহকারী। তোমার ভাষা হবে অত্যন্ত সহজ-সরল, মার্জিত, প্রাসঙ্গিক এবং ১ থেকে ২ লাইনের সংক্ষিপ্ত কিন্তু সম্পূর্ণ।
 
 ${memoryContext}
 
 নির্দেশনা ও নিয়মাবলী:
-১. সহজ ও প্রাসঙ্গিক ডেলিভারি: কোনো কাঠখোট্টা বা রোবটের মতো বইয়ের ভাষা ব্যবহার করবে না। কাস্টমার ঠিক যে বিষয়ে প্রশ্ন করেছে, অপ্রাসঙ্গিক কোনো কথা না বাড়িয়ে মিষ্টি ও সহজ ভাষায় উত্তর দাও।
+১. সহজ ও প্রাসঙ্গিক ডেলিভারি: কোনো কাঠখোট্টা বা রোবটের মতো বইয়ের ভাষা ব্যবহার করবে না। কাস্টমার ঠিক যে বিষয়ে প্রশ্ন করেছে, অপ্রাসঙ্গিক কথা না বাড়িয়ে মিষ্টি ও সহজ ভাষায় উত্তর দাও।
 ২. বাংলিশ বোঝা: কাস্টমার বাংলিশে লিখলে তা বুঝে বাংলায় স্বাভাবিক ও প্রাঞ্জল উত্তর দেবে।
 ৩. কাগজপত্র হ্যান্ডলিং: কাস্টমার যদি পূর্বে কাগজপত্র জমা দিয়ে থাকে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তবে তার কাছে আর নতুন করে কাগজপত্র চাইবে না। শুধু বলবে কোন পদের জন্য আবেদন করতে চায়।
 ৪. সার্কুলার যাচাই:
@@ -305,11 +340,15 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // কল আসলে অটো মেসেজ পাঠানো
+    // কল আসলে অটো মেসেজ
     sock.ev.on('call', async (calls) => {
         for (const call of calls) {
             if (call.status === 'offer') {
                 const callerJid = call.from;
+
+                // যদি ChatFilter এ বন্ধ করা থাকে, তবে কোনো অটো মেসেজও যাবে না
+                if (isChatFiltered(callerJid)) continue;
+
                 try {
                     await sock.sendPresenceUpdate('composing', callerJid);
                     await delay(1500);
@@ -344,22 +383,37 @@ async function connectToWhatsApp() {
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
-            // আপনি নিজে মোবাইল থেকে উত্তর দিলে ২৪ ঘণ্টার জন্য অটো-পজ
+            // 🛑 #Stop এবং #Start কমান্ড হ্যান্ডলিং (আপনার পাঠানো মেসেজ থেকে)
             if (msg.key.fromMe) {
-                if (text.trim() === "#start") {
-                    pausedUsers.delete(jid);
-                    const sent = await sock.sendMessage(jid, { text: "বট চালু করা হয়েছে।" });
+                const cleanCmd = text.trim().toLowerCase();
+
+                if (cleanCmd === "#stop") {
+                    updateChatFilter(jid, 'stop');
+                    pausedUsers.set(jid, Infinity); // পার্মানেন্ট পজ
+                    const sent = await sock.sendMessage(jid, { text: "🛑 এই চ্যাটে এআই বট বন্ধ করা হলো। পুনরায় চালু করতে #Start লিখুন।" });
                     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-                } else if (text.trim() === "#stop") {
-                    pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
-                    const sent = await sock.sendMessage(jid, { text: "বট বন্ধ করা হলো।" });
+                    return;
+                } 
+                
+                if (cleanCmd === "#start") {
+                    updateChatFilter(jid, 'start');
+                    pausedUsers.delete(jid); // পজ বাতিল
+                    const sent = await sock.sendMessage(jid, { text: "✅ এই চ্যাটে এআই বট পুনরায় চালু করা হলো।" });
                     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-                } else {
-                    pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
+                    return;
                 }
+
+                // আপনি নিজে কোনো সাধারণ কথা লিখলে সাময়িক ৩০ মিনিটের বিরতি
+                pausedUsers.set(jid, Date.now() + 30 * 60 * 1000);
                 continue;
             }
 
+            // 🚫 ChatFilter.json চেক: যদি এই ইউজার বন্ধ তালিকায় থাকে, তবে বট আজীবন চুপ থাকবে!
+            if (isChatFiltered(jid)) {
+                continue;
+            }
+
+            // সাধারণ সাময়িক পজ চেক
             if (pausedUsers.has(jid)) {
                 if (Date.now() < pausedUsers.get(jid)) continue;
                 pausedUsers.delete(jid);
@@ -387,7 +441,7 @@ async function connectToWhatsApp() {
 
             if (!text.trim() && !base64Image) continue;
 
-            // 🟢 হিউম্যান টাচ: কাস্টমারের চ্যাটে "typing..." দেখানো
+            // কাস্টমারের চ্যাটে "typing..." দেখানো
             try {
                 await sock.sendPresenceUpdate('composing', jid);
             } catch (e) {}
@@ -395,7 +449,7 @@ async function connectToWhatsApp() {
             // এআই উত্তর তৈরি
             const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
 
-            // 🟢 ২ থেকে ২.৫ সেকেন্ডের স্বাভাবিক মানুষের মতো বিরতি (Human-like delay)
+            // মানুষের মতো বিরতি (Delay)
             await delay(2200);
 
             // পেমেন্ট সংক্রান্ত অ্যালার্ট
@@ -413,11 +467,9 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            // কাস্টমারকে সুন্দরভাবে মেসেজ পাঠানো
             const sent = await sock.sendMessage(jid, { text: aiResponse });
             if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
 
-            // টাইপিং বন্ধ করা
             try {
                 await sock.sendPresenceUpdate('paused', jid);
             } catch (e) {}
@@ -476,32 +528,4 @@ app.get('/qr', async (req, res) => {
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text, images } = req.body;
-        if (!sock) return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
-
-        let targetJid = await getJidFromInvite(channel_id);
-        if (!targetJid) return res.status(400).json({ status: 'error', error: `Could not resolve JID` });
-
-        if (images && Array.isArray(images) && images.length > 0) {
-            const mainBuffer = Buffer.from(images[0], 'base64');
-            await sock.sendMessage(targetJid, { image: mainBuffer, caption: text });
-
-            for (let i = 1; i < images.length; i++) {
-                await delay(1200);
-                const buffer = Buffer.from(images[i], 'base64');
-                await sock.sendMessage(targetJid, { image: buffer });
-            }
-        } else {
-            await sock.sendMessage(targetJid, { text: text });
-        }
-
-        res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
-    } catch (error) {
-        res.status(500).json({ status: 'error', error: error.message });
-    }
-});
-
-fetchLastTwoMonthsJobs();
-setInterval(fetchLastTwoMonthsJobs, 12 * 60 * 60 * 1000);
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+        if (!sock) return res.status(500).json({ st
