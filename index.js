@@ -528,4 +528,32 @@ app.get('/qr', async (req, res) => {
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text, images } = req.body;
-        if (!sock) return res.status(500).json({ st
+        if (!sock) return res.status(500).json({ status: 'error', error: 'WhatsApp socket not connected' });
+
+        let targetJid = await getJidFromInvite(channel_id);
+        if (!targetJid) return res.status(400).json({ status: 'error', error: `Could not resolve JID` });
+
+        if (images && Array.isArray(images) && images.length > 0) {
+            const mainBuffer = Buffer.from(images[0], 'base64');
+            await sock.sendMessage(targetJid, { image: mainBuffer, caption: text });
+
+            for (let i = 1; i < images.length; i++) {
+                await delay(1200);
+                const buffer = Buffer.from(images[i], 'base64');
+                await sock.sendMessage(targetJid, { image: buffer });
+            }
+        } else {
+            await sock.sendMessage(targetJid, { text: text });
+        }
+
+        res.json({ status: 'success', message: 'Posted to channel successfully!', jid: targetJid });
+    } catch (error) {
+        res.status(500).json({ status: 'error', error: error.message });
+    }
+});
+
+fetchLastTwoMonthsJobs();
+setInterval(fetchLastTwoMonthsJobs, 12 * 60 * 60 * 1000);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
