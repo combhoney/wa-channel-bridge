@@ -30,10 +30,8 @@ const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODEL
 const LLM_API_URL = process.env.LLM_API_URL || "https://ollama.com/v1/chat/completions";
 const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
-// ট্র্যাকিং
 const chatHistories = new Map();
 const pausedUsers = new Map();
-const channelSentUsers = new Set();
 const botSentMessageIds = new Set();
 
 const KNOWN_INVITES = [
@@ -42,7 +40,7 @@ const KNOWN_INVITES = [
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
-// ==================== ChatFilter.json হ্যান্ডলার (#Stop / #Start) ====================
+// ==================== ChatFilter.json হ্যান্ডলার (#Stop পার্মানেন্ট) ====================
 const CHAT_FILTER_FILE = './ChatFilter.json';
 
 function getStoppedUsersList() {
@@ -56,16 +54,13 @@ function getStoppedUsersList() {
     }
 }
 
-function updateChatFilter(jid, action) {
+// শুধু স্টপ যোগ করার ফাংশন (#Start কোড থেকে সম্পূর্ণ রিমুভ করা হয়েছে)
+function addStoppedUser(jid) {
     const list = getStoppedUsersList();
-    if (action === 'stop') {
-        list.add(jid);
-    } else if (action === 'start') {
-        list.delete(jid);
-    }
-
+    list.add(jid);
     try {
         fs.writeFileSync(CHAT_FILTER_FILE, JSON.stringify(Array.from(list), null, 2));
+        console.log(`🛑 ChatFilter.json-এ পার্মানেন্ট স্টপ যোগ হয়েছে: ${jid}`);
     } catch (e) {
         console.error("ChatFilter.json write error:", e);
     }
@@ -76,9 +71,9 @@ function isChatFiltered(jid) {
     return list.has(jid);
 }
 
-// ==================== history.json ডায়নামিক মেমোরি হ্যান্ডলার ====================
+// ==================== history.json পার্মানেন্ট মেমোরি হ্যান্ডলার ====================
 const HISTORY_FILE = './history.json';
-const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000; // ১৮০ দিন
 
 function getCustomerMemory(userPhone) {
     if (!fs.existsSync(HISTORY_FILE)) return null;
@@ -90,7 +85,7 @@ function getCustomerMemory(userPhone) {
     }
 }
 
-function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false) {
+function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false, linkSent = false) {
     let data = {};
     if (fs.existsSync(HISTORY_FILE)) {
         try {
@@ -102,6 +97,7 @@ function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false) {
 
     const now = Date.now();
 
+    // ১৮০ দিন পার হওয়া পুরনো ডাটা অটো ডিলিট
     for (const [phone, profile] of Object.entries(data)) {
         if (profile.last_active && (now - profile.last_active > SIX_MONTHS_MS)) {
             delete data[phone];
@@ -112,6 +108,7 @@ function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false) {
         last_active: now,
         interests: [],
         docs_provided: false,
+        channel_link_sent: false,
         notes: ""
     };
 
@@ -119,6 +116,10 @@ function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false) {
 
     if (hasMedia || profileUpdate.docs_provided === true) {
         current.docs_provided = true;
+    }
+
+    if (linkSent || profileUpdate.channel_link_sent === true) {
+        current.channel_link_sent = true;
     }
 
     if (profileUpdate.interest && typeof profileUpdate.interest === 'string') {
@@ -193,19 +194,15 @@ async function fetchLastTwoMonthsJobs() {
     } catch (e) {}
 }
 
-// 🔍 কাস্টমার নাম বললে ওয়েবসাইটগুলোতে রিয়েল-টাইম সার্চ করার ফাংশন
 async function searchJobOnline(userMessage) {
-    // সাধারণ প্রশ্ন বা কুশল বিনিময় হলে সার্চ করবে না
     if (userMessage.length < 4) return null;
 
-    // অপ্রয়োজনীয় শব্দ বাদ দিয়ে মূল চাকরির নাম বের করা
     const cleanQuery = userMessage
         .replace(/(আবেদন|কিভাবে|করব|করতে|চাই|চাকরি|নিয়োগ|সার্কুলার|সম্পর্কে|জানতে|ভাই|বট|হবে|কি|আছে|তথ্য|প্লিজ)/gi, '')
         .trim();
 
     if (cleanQuery.length < 3) return null;
 
-    // ১. প্রথমে লোকাল jobs.json এ খোঁজা
     if (fs.existsSync('./jobs.json')) {
         try {
             const jobs = JSON.parse(fs.readFileSync('./jobs.json', 'utf-8'));
@@ -217,7 +214,6 @@ async function searchJobOnline(userMessage) {
         } catch (e) {}
     }
 
-    // ২. লোকাল ফাইলে না থাকলে নির্দিষ্ট ওয়েবসাইট ৩টিতে সরাসরি সার্চ করা
     const encoded = encodeURIComponent(cleanQuery);
     for (const site of JOB_SITES) {
         try {
@@ -227,7 +223,7 @@ async function searchJobOnline(userMessage) {
                 if (posts && posts.length > 0) {
                     const p = posts[0];
                     const fullText = cleanHTML(p.content?.rendered || p.excerpt?.rendered || "");
-                    return `বিজ্ঞপ্তি: ${p.title.rendered}\nনিয়মাবলী ও বিবরণ: ${fullText.slice(0, 1000)}`;
+                    return `বিজ্ঞপ্তি: ${p.title.rendered}\nনিয়মাবলী: ${fullText.slice(0, 1000)}`;
                 }
             }
         } catch (err) {}
@@ -236,52 +232,60 @@ async function searchJobOnline(userMessage) {
     return null;
 }
 
-// ==================== এআই লজিক ও আবেদন মাধ্যম ভেরিফিকেশন ====================
+// ==================== এআই লজিক (অতি-সংক্ষিপ্ত ১ লাইনের কঠোর রুল) ====================
 async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia = false) {
-    const hasChannelLinkAlready = channelSentUsers.has(userPhone);
     const userMemory = getCustomerMemory(userPhone);
+    const alreadyGotChannelLink = userMemory?.channel_link_sent === true;
 
-    // যদি কাস্টমার ছবি না দেয়, তবে ইন্টারনেটে সার্কুলারটি সার্চ করে যাচাই করা
+    // কাস্টমার কোনো চাকরির ব্যাপারে জানতে চাইছে কি না যাচাই করা
+    const isJobInquiry = /(চাকরি|নিয়োগ|সার্কুলার|আবেদন|পদ|job|circular|apply)/i.test(userMessage) || base64Image !== null;
+
     let searchedJobInfo = "";
-    if (!base64Image) {
+    if (!base64Image && isJobInquiry) {
         const found = await searchJobOnline(userMessage);
         if (found) {
-            searchedJobInfo = `\n[ওয়েবসাইটে প্রাপ্ত সার্কুলারের আসল তথ্য]:\n${found}\n`;
+            searchedJobInfo = `\n[ওয়েবসাইটে প্রাপ্ত সার্কুলার তথ্য]:\n${found}\n`;
         }
     }
 
     let memoryContext = "";
     if (userMemory) {
         memoryContext = `
-[কাস্টমারের পূর্বের প্রোফাইল ও তথ্য]:
-- পছন্দ বা আগ্রহ: ${userMemory.interests?.length > 0 ? userMemory.interests.join(", ") : "জানা নেই"}
-- প্রয়োজনীয় কাগজপত্র জমা আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, জমা আছে (পুনরায় চাইবে না)" : "না"}
-- অন্যান্য নোট: ${userMemory.notes || "নাই"}
+[কাস্টমার রেকর্ড]:
+- পছন্দ: ${userMemory.interests?.length > 0 ? userMemory.interests.join(", ") : "জানা নেই"}
+- কাগজপত্র দেওয়া আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, পূর্বে দিয়েছে (কাগজপত্র চাইবে না)" : "না"}
 `;
     }
 
+    // শুধুমাত্র একবার এবং কেবল চাকরির ব্যাপারে জানতে চাইলে লিংক দেওয়া হবে
+    let channelInstruction = "";
+    if (!alreadyGotChannelLink && isJobInquiry) {
+        channelInstruction = `\n- যেহেতু কাস্টমার নিয়োগ সম্পর্কে জানতে চেয়েছে এবং পূর্বে লিংক পায়নি, তাই উত্তরের শেষে একবার চ্যানেলের লিংক দিয়ে বলবে: "আমাদের চ্যানেলে যুক্ত থাকুন: ${CHANNEL_LINK}"`;
+    } else {
+        channelInstruction = `\n- চ্যানেলের কোনো লিংক দেবে না।`;
+    }
+
     const systemPrompt = `
-তুমি একজন চাকরির অনলাইন আবেদন সহকারী। তোমার প্রথম ও প্রধান দায়িত্ব হলো—যেকোনো সার্কুলারের ক্ষেত্রে এটি কীভাবে আবেদন করতে হবে (অনলাইন নাকি ডাকযোগ নাকি সরাসরি অফিসে যাওয়া) তা আগে নিশ্চিত হওয়া।
+তুমি একজন অনলাইন চাকরির আবেদন সহকারী। 
+
+🚨 কঠোর নিয়মাবলী:
+১. অতি-সংক্ষিপ্ত ডেলিভারি: উত্তর অবশ্যই সর্বোচ্চ ১ লাইনের মধ্যে শেষ করতে হবে। কোনো বড় প্যারাগ্রাফ, ভূমিকা, অতিরিক্ত শুভেচ্ছা বা নীতিবাক্য সম্পূর্ণ নিষিদ্ধ। যতটুকু প্রশ্ন ঠিক ততটুকুই উত্তর।
+২. ফি / চার্জ: সরকারি বা বেসরকারি যেকোনো চাকরির ক্ষেত্রে খরচ জিজ্ঞেস করলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনোভাবেই 'সার্ভিস চার্জ' বা সরকারি/বেসরকারি ভাগ করে বলবে না)।
+৩. আবেদনের মাধ্যম:
+   - সরাসরি অফিসে যাওয়ার হলে: "এটা অনলাইনে হবে না ভাই, সরাসরি তাদের অফিসে গিয়ে যোগাযোগ করতে হবে।"
+   - ডাকযোগে পাঠানোর হলে: "এটা অনলাইনে হবে না ভাই, ডাক বিভাগের মাধ্যমে পাঠাতে হবে।"
+   - অনলাইনে আবেদনযোগ্য হলে: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
+   - তথ্য খুঁজে না পেলে: "এই নিয়োগের সঠিক তথ্য পাচ্ছি না ভাই, সার্কুলারের ছবি থাকলে পাঠান।"
+৪. কাগজপত্র জমা: মেমোরিতে যদি থাকে কাগজপত্র অলরেডি দিয়েছে (${userMemory?.docs_provided ? "হ্যাঁ" : "না"}), তবে নতুন করে কোনো কাগজপত্র চাইবে না।
+${channelInstruction}
+৫. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
+
+৬. প্রোফাইল নোট:
+কথোপকথন থেকে কাস্টমারের কোনো নতুন আগ্রহ বা তথ্য পেলে উত্তরের একদম শেষে লিখবে:
+[PROFILE_UPDATE: {"interest": "আগ্রহের বিষয়", "docs_provided": true/false}]
 
 ${searchedJobInfo}
 ${memoryContext}
-
-কঠোর যাচাই ও উত্তর দেওয়ার নিয়মাবলী:
-১. আবেদনের মাধ্যম যাচাই (সবচেয়ে গুরুত্বপূর্ণ):
-   - যদি বিজ্ঞপ্তিতে অনলাইন ওয়েবসাইট বা Teletalk লিংক থাকে: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি ছাড়া সার্ভিস চার্জ সরকারি ৫০ টাকা / বেসরকারি ১০০ টাকা। আবেদন করতে চাইলে প্রয়োজনীয় কাগজপত্র পাঠান।"
-   - যদি ডাকযোগে বা কুরিয়ারে পাঠানোর কথা থাকে: "এটা তো অনলাইনে আবেদন করা যাবে না ভাই, ডাক বিভাগের/কুরিয়ারের মাধ্যমে কাগজপত্র পাঠাতে হবে।"
-   - যদি সরাসরি সাক্ষাৎকার (Walk-in Interview) বা অফিসে উপস্থিত হওয়ার কথা থাকে: "এটা তো অনলাইনে আবেদন হবে না ভাই, সরাসরি তাদের অফিসে গিয়ে ইন্টারভিউ দিতে হবে/কাগজপত্র জমা দিতে হবে।"
-   - যদি কাস্টমার কোনো সার্কুলারের নাম বলে কিন্তু উপরে প্রাপ্ত তথ্যে বা তোমার কাছে সেটির সঠিক হদিস না থাকে: "এই নিয়োগটির সঠিক তথ্য খুঁজে পাচ্ছি না ভাই, আপনার কাছে সার্কুলারের কোনো ছবি বা পিডিএফ থাকলে পাঠিয়ে দিন, দেখে নিশ্চিত করে বলে দিচ্ছি।"
-
-২. সহজ ও সংক্ষিপ্ত ডেলিভারি: উত্তর হবে সর্বোচ্চ ১ থেকে ২ লাইনের। কোনো অতিরিক্ত ভূমিকা বা নীতিবাক্য লিখবে না। কাস্টমার বাংলিশে লিখলে তা বুঝে বাংলায় উত্তর দেবে।
-৩. কাগজপত্র হ্যান্ডলিং: কাস্টমার পূর্বে কাগজপত্র জমা দিয়ে থাকলে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তার কাছে আর নতুন করে কাগজপত্র চাইবে না।
-৪. সার্ভিস চার্জ: সরকারি চাকরির অনলাইন আবেদন ৫০ টাকা, বেসরকারি ১০০ টাকা।
-${!hasChannelLinkAlready ? `৫. কথা শেষ হলে বা চাকরি না থাকলে একবার চ্যানেলে যুক্ত হতে বলবে: "${CHANNEL_LINK}"` : `৫. চ্যানেলের লিংক পূর্বে দেওয়া হয়ে গেছে, তাই নতুন করে লিংক দিবে না।`}
-৬. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের একজন প্রতিনিধি খুব শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
-
-৭. মেমোরি আপডেট:
-কথোপকথন থেকে কাস্টমারের যেকোনো নতুন আগ্রহ (কাজের ধরন, শিক্ষাগত যোগ্যতা, জেলা) বা নতুন তথ্য পেলে উত্তরের শেষে লিখবে:
-[PROFILE_UPDATE: {"interest": "কাস্টমারের আগ্রহ", "docs_provided": true/false, "note": "সংক্ষিপ্ত তথ্য"}]
 `;
 
     if (!chatHistories.has(userPhone)) {
@@ -292,7 +296,7 @@ ${!hasChannelLinkAlready ? `৫. কথা শেষ হলে বা চাক�
     let currentContent;
     if (base64Image) {
         currentContent = [
-            { type: "text", text: userMessage || "বিজ্ঞপ্তিটি দেখে নিশ্চিত হয়ে ১-২ লাইনে বলো এটা অনলাইনে আবেদন হবে, নাকি ডাকযোগে, নাকি সরাসরি অফিসে যেতে হবে?" },
+            { type: "text", text: userMessage || "সার্কুলারটি দেখে ১ লাইনে বলো এটা অনলাইনে আবেদন হবে, নাকি ডাকযোগে, নাকি সরাসরি অফিসে যেতে হবে?" },
             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
         ];
     } else {
@@ -300,14 +304,14 @@ ${!hasChannelLinkAlready ? `৫. কথা শেষ হলে বা চাক�
     }
 
     history.push({ role: "user", content: currentContent });
-    if (history.length > 8) history.shift();
+    if (history.length > 6) history.shift();
 
     const messagesToSend = [
         { role: "system", content: systemPrompt },
         ...history
     ];
 
-    if (API_KEYS.length === 0) return "API Key পাওয়া যায়নি। Render চেক করুন।";
+    if (API_KEYS.length === 0) return "API Key পাওয়া যায়নি।";
 
     for (let k = 0; k < API_KEYS.length; k++) {
         const currentKey = API_KEYS[k];
@@ -323,7 +327,8 @@ ${!hasChannelLinkAlready ? `৫. কথা শেষ হলে বা চাক�
                     body: JSON.stringify({
                         model: currentModel,
                         messages: messagesToSend,
-                        temperature: 0.1
+                        temperature: 0.1,
+                        max_tokens: 70 // 🔥 বড় মেসেজ আটকানোর কঠোর লিমিট (১ লাইনে থামিয়ে দেবে)
                     })
                 });
 
@@ -332,21 +337,23 @@ ${!hasChannelLinkAlready ? `৫. কথা শেষ হলে বা চাক�
                 let reply = data.choices?.[0]?.message?.content?.trim();
 
                 if (reply) {
+                    let linkSentNow = false;
+                    if (reply.includes(CHANNEL_LINK)) {
+                        linkSentNow = true;
+                    }
+
                     const profileMatch = reply.match(/\[PROFILE_UPDATE:\s*({.*?})\]/s);
                     if (profileMatch) {
                         try {
                             const updateObj = JSON.parse(profileMatch[1]);
-                            saveDynamicMemory(userPhone, updateObj, hasMedia);
+                            saveDynamicMemory(userPhone, updateObj, hasMedia, linkSentNow);
                         } catch (e) {}
                         reply = reply.replace(/\[PROFILE_UPDATE:\s*({.*?})\]/s, '').trim();
-                    } else if (hasMedia) {
-                        saveDynamicMemory(userPhone, {}, true);
+                    } else {
+                        saveDynamicMemory(userPhone, {}, hasMedia, linkSentNow);
                     }
 
                     history.push({ role: "assistant", content: reply });
-                    if (reply.includes(CHANNEL_LINK)) {
-                        channelSentUsers.add(userPhone);
-                    }
                     return reply;
                 }
             } catch (err) {}
@@ -420,30 +427,24 @@ async function connectToWhatsApp() {
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
-            // #Stop ও #Start কমান্ড
+            // 🛑 শুধুমাত্র #Stop কমান্ড হ্যান্ডলার (#Start রিমুভ করা হয়েছে)
             if (msg.key.fromMe) {
                 const cleanCmd = text.trim().toLowerCase();
 
                 if (cleanCmd === "#stop") {
-                    updateChatFilter(jid, 'stop');
+                    addStoppedUser(jid); // ChatFilter.json-এ পার্মানেন্ট যুক্ত করা
                     pausedUsers.set(jid, Infinity);
-                    const sent = await sock.sendMessage(jid, { text: "🛑 এই চ্যাটে এআই বট বন্ধ করা হলো। পুনরায় চালু করতে #Start লিখুন।" });
-                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
-                    return;
-                } 
-                
-                if (cleanCmd === "#start") {
-                    updateChatFilter(jid, 'start');
-                    pausedUsers.delete(jid);
-                    const sent = await sock.sendMessage(jid, { text: "✅ এই চ্যাটে এআই বট পুনরায় চালু করা হলো।" });
+                    const sent = await sock.sendMessage(jid, { text: "🛑 এই চ্যাটে এআই বট স্থায়ীভাবে বন্ধ করা হলো।" });
                     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                     return;
                 }
 
+                // এডমিন নিজে কোনো সাধারণ কথা লিখলে সাময়িক ৩০ মিনিটের পজ
                 pausedUsers.set(jid, Date.now() + 30 * 60 * 1000);
                 continue;
             }
 
+            // 🚫 ChatFilter.json চেক: যদি এই একাউন্ট বন্ধ থাকে, বট আজীবন চুপ থাকবে
             if (isChatFiltered(jid)) continue;
 
             if (pausedUsers.has(jid)) {
@@ -466,7 +467,7 @@ async function connectToWhatsApp() {
                 try {
                     const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     const pdfData = await pdfParse(buffer);
-                    text = `[পিডিএফ সার্কুলার টেক্সট]:\n${pdfData.text.slice(0, 2000)}\n\nকাস্টমার: ${text || "আবেদনের নিয়ম জানাও।"}`;
+                    text = `[পিডিএফ সার্কুলার টেক্সট]:\n${pdfData.text.slice(0, 1500)}\n\nকাস্টমার: ${text || "আবেদনের নিয়ম জানাও।"}`;
                     hasMedia = true;
                 } catch (e) {}
             }
@@ -477,10 +478,9 @@ async function connectToWhatsApp() {
                 await sock.sendPresenceUpdate('composing', jid);
             } catch (e) {}
 
-            // এআই উত্তর তৈরি (সার্চ ও ভেরিফিকেশন সহ)
             const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
 
-            await delay(2200);
+            await delay(2000);
 
             if (aiResponse.includes("[ALERT_ADMIN]")) {
                 const cleanReply = aiResponse.replace("[ALERT_ADMIN]", "").trim();
@@ -512,7 +512,6 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode === DisconnectReason.loggedOut) {
-                console.log('সেশন লগআউট হয়ে গেছে! পুরনো ফাইল ডিলিট করা হচ্ছে...');
                 if (fs.existsSync('baileys_auth')) {
                     fs.rmSync('baileys_auth', { recursive: true, force: true });
                 }
@@ -529,8 +528,6 @@ async function connectToWhatsApp() {
 connectToWhatsApp();
 
 // ==================== রিসেট, QR কোড ও চ্যানেল পোস্ট API ====================
-
-// 🔄 আটকে থাকা সেশন এক ক্লিকে মুছে ফ্রেশ QR কোড আনার রাউট
 app.get('/reset', (req, res) => {
     try {
         if (fs.existsSync('baileys_auth')) {
