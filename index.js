@@ -54,7 +54,6 @@ function getStoppedUsersList() {
     }
 }
 
-// শুধু স্টপ যোগ করার ফাংশন (#Start কোড থেকে সম্পূর্ণ রিমুভ করা হয়েছে)
 function addStoppedUser(jid) {
     const list = getStoppedUsersList();
     list.add(jid);
@@ -73,7 +72,7 @@ function isChatFiltered(jid) {
 
 // ==================== history.json পার্মানেন্ট মেমোরি হ্যান্ডলার ====================
 const HISTORY_FILE = './history.json';
-const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000; // ১৮০ দিন
+const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
 
 function getCustomerMemory(userPhone) {
     if (!fs.existsSync(HISTORY_FILE)) return null;
@@ -97,7 +96,6 @@ function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false, link
 
     const now = Date.now();
 
-    // ১৮০ দিন পার হওয়া পুরনো ডাটা অটো ডিলিট
     for (const [phone, profile] of Object.entries(data)) {
         if (profile.last_active && (now - profile.last_active > SIX_MONTHS_MS)) {
             delete data[phone];
@@ -232,19 +230,18 @@ async function searchJobOnline(userMessage) {
     return null;
 }
 
-// ==================== এআই লজিক (অতি-সংক্ষিপ্ত ১ লাইনের কঠোর রুল) ====================
+// ==================== এআই লজিক ও সেলফ-রিফ্লেকশন ====================
 async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia = false) {
     const userMemory = getCustomerMemory(userPhone);
     const alreadyGotChannelLink = userMemory?.channel_link_sent === true;
 
-    // কাস্টমার কোনো চাকরির ব্যাপারে জানতে চাইছে কি না যাচাই করা
     const isJobInquiry = /(চাকরি|নিয়োগ|সার্কুলার|আবেদন|পদ|job|circular|apply)/i.test(userMessage) || base64Image !== null;
 
     let searchedJobInfo = "";
     if (!base64Image && isJobInquiry) {
         const found = await searchJobOnline(userMessage);
         if (found) {
-            searchedJobInfo = `\n[ওয়েবসাইটে প্রাপ্ত সার্কুলার তথ্য]:\n${found}\n`;
+            searchedJobInfo = `\n[সার্কুলার তথ্য]:\n${found}\n`;
         }
     }
 
@@ -253,34 +250,39 @@ async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia =
         memoryContext = `
 [কাস্টমার রেকর্ড]:
 - পছন্দ: ${userMemory.interests?.length > 0 ? userMemory.interests.join(", ") : "জানা নেই"}
-- কাগজপত্র দেওয়া আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, পূর্বে দিয়েছে (কাগজপত্র চাইবে না)" : "না"}
+- কাগজপত্র জমা আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, পূর্বে দিয়েছে (নতুন করে চাইবে না)" : "না"}
 `;
     }
 
-    // শুধুমাত্র একবার এবং কেবল চাকরির ব্যাপারে জানতে চাইলে লিংক দেওয়া হবে
     let channelInstruction = "";
     if (!alreadyGotChannelLink && isJobInquiry) {
-        channelInstruction = `\n- যেহেতু কাস্টমার নিয়োগ সম্পর্কে জানতে চেয়েছে এবং পূর্বে লিংক পায়নি, তাই উত্তরের শেষে একবার চ্যানেলের লিংক দিয়ে বলবে: "আমাদের চ্যানেলে যুক্ত থাকুন: ${CHANNEL_LINK}"`;
+        channelInstruction = `\n- যেহেতু কাস্টমার নিয়োগ নিয়ে জানতে চেয়েছে এবং পূর্বে লিংক পায়নি, তাই উত্তরের সাথে একবার লিংক দাও: "${CHANNEL_LINK}"`;
     } else {
         channelInstruction = `\n- চ্যানেলের কোনো লিংক দেবে না।`;
     }
 
     const systemPrompt = `
-তুমি একজন অনলাইন চাকরির আবেদন সহকারী। 
+তুমি একজন অনলাইন চাকরির আবেদন সহকারী। আমরা শুধুমাত্র "অনলাইন আবেদন"-এর সার্ভিস প্রদান করি।
 
-🚨 কঠোর নিয়মাবলী:
-১. অতি-সংক্ষিপ্ত ডেলিভারি: উত্তর অবশ্যই সর্বোচ্চ ১ লাইনের মধ্যে শেষ করতে হবে। কোনো বড় প্যারাগ্রাফ, ভূমিকা, অতিরিক্ত শুভেচ্ছা বা নীতিবাক্য সম্পূর্ণ নিষিদ্ধ। যতটুকু প্রশ্ন ঠিক ততটুকুই উত্তর।
-২. ফি / চার্জ: সরকারি বা বেসরকারি যেকোনো চাকরির ক্ষেত্রে খরচ জিজ্ঞেস করলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনোভাবেই 'সার্ভিস চার্জ' বা সরকারি/বেসরকারি ভাগ করে বলবে না)।
-৩. আবেদনের মাধ্যম:
-   - সরাসরি অফিসে যাওয়ার হলে: "এটা অনলাইনে হবে না ভাই, সরাসরি তাদের অফিসে গিয়ে যোগাযোগ করতে হবে।"
-   - ডাকযোগে পাঠানোর হলে: "এটা অনলাইনে হবে না ভাই, ডাক বিভাগের মাধ্যমে পাঠাতে হবে।"
-   - অনলাইনে আবেদনযোগ্য হলে: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
-   - তথ্য খুঁজে না পেলে: "এই নিয়োগের সঠিক তথ্য পাচ্ছি না ভাই, সার্কুলারের ছবি থাকলে পাঠান।"
-৪. কাগজপত্র জমা: মেমোরিতে যদি থাকে কাগজপত্র অলরেডি দিয়েছে (${userMemory?.docs_provided ? "হ্যাঁ" : "না"}), তবে নতুন করে কোনো কাগজপত্র চাইবে না।
+🚨 অতি-গুরুত্বপূর্ণ ব্যবসায়িক নিয়মাবলী:
+১. বিজ্ঞপ্তির মাধ্যম যাচাই ও উত্তর:
+   - ডাকযোগে হলে: "আমরা শুধু অনলাইনে আবেদন করে দিয়ে থাকি, আর আপনি যে নিয়োগটি দিয়েছেন এটাতে বলা হয়েছে ডাকযোগে আপনার ডকুমেন্টসগুলো পাঠাতে।"
+   - সরাসরি অফিসে গিয়ে জমা/ইন্টারভিউ হলে: "আমরা শুধু অনলাইনে আবেদন করে দিয়ে থাকি, আর এটাতে সরাসরি তাদের অফিসে গিয়ে কাগজপত্র জমা দিতে বলা হয়েছে।"
+   - কাস্টমার যদি জিজ্ঞেস করে "আপনি পারবেন কিনা?": "না, আমরা শুধুমাত্র অনলাইনে যে আবেদনগুলো করার সুযোগ থাকে সেগুলোই আবেদন করে দিয়ে থাকি।"
+   - যদি অনলাইন আবেদন হয়: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
+   - যদি কোনো বিষয়ে কনফিউজড হও, স্পষ্ট তথ্য না পাও বা নিশ্চিত না হও: অন্য কোনো কথা বানিয়ে বলবে না, সরাসরি বলবে: "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।"
+
+২. খরচ / ফি: খরচের কথা জানতে চাইলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনো অবস্থাতেই 'সার্ভিস চার্জ' বলবে না)।
+৩. কাগজপত্র: কাস্টমার পূর্বে কাগজপত্র জমা দিয়ে থাকলে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তার কাছে আর নতুন করে কাগজপত্র চাইবে না।
 ${channelInstruction}
-৫. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
+৪. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
 
-৬. প্রোফাইল নোট:
+🧠 সেলফ-রিফ্লেকশন ও সংক্ষেপকরণ চিন্তা (Thinking Process):
+- উত্তর দেওয়ার আগে মনে মনে চিন্তা করো: "আমি এই উত্তরটি কি আরও ছোট ও সহজ করতে পারি? এটি কি ১ লাইনে শেষ করা সম্ভব?"
+- কোনো অপ্রাসঙ্গিক শুভেচ্ছা, বড় ভূমিকা বা বাড়তি বাক্য সম্পূর্ণ নিষিদ্ধ।
+- ভাবনার পর শুধুমাত্র চূড়ান্ত ১ লাইনের অতি-সংক্ষিপ্ত উত্তরটি প্রকাশ করবে।
+
+৫. প্রোফাইল নোট:
 কথোপকথন থেকে কাস্টমারের কোনো নতুন আগ্রহ বা তথ্য পেলে উত্তরের একদম শেষে লিখবে:
 [PROFILE_UPDATE: {"interest": "আগ্রহের বিষয়", "docs_provided": true/false}]
 
@@ -296,7 +298,7 @@ ${memoryContext}
     let currentContent;
     if (base64Image) {
         currentContent = [
-            { type: "text", text: userMessage || "সার্কুলারটি দেখে ১ লাইনে বলো এটা অনলাইনে আবেদন হবে, নাকি ডাকযোগে, নাকি সরাসরি অফিসে যেতে হবে?" },
+            { type: "text", text: userMessage || "বিজ্ঞপ্তিটি দেখে ১ লাইনে জানাও এটা অনলাইন আবেদন, নাকি ডাকযোগে বা সরাসরি অফিসে যেতে হবে?" },
             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
         ];
     } else {
@@ -327,8 +329,8 @@ ${memoryContext}
                     body: JSON.stringify({
                         model: currentModel,
                         messages: messagesToSend,
-                        temperature: 0.1,
-                        max_tokens: 70 // 🔥 বড় মেসেজ আটকানোর কঠোর লিমিট (১ লাইনে থামিয়ে দেবে)
+                        temperature: 0.1
+                        // max_tokens বাতিল করা হয়েছে যাতে কোনো বাক্য অর্ধেক কেটে না যায়
                     })
                 });
 
@@ -337,6 +339,9 @@ ${memoryContext}
                 let reply = data.choices?.[0]?.message?.content?.trim();
 
                 if (reply) {
+                    // DeepSeek বা Qwen-এর ইন্টারনাল <think> ট্যাগ থাকলে তা কাস্টমারকে না দেখিয়ে ক্লিন করা
+                    reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
                     let linkSentNow = false;
                     if (reply.includes(CHANNEL_LINK)) {
                         linkSentNow = true;
@@ -359,7 +364,7 @@ ${memoryContext}
             } catch (err) {}
         }
     }
-    return "সংযোগের সমস্যা হচ্ছে ভাই, একটু পর মেসেজ দিন।";
+    return "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।";
 }
 
 // ==================== হোয়াটসঅ্যাপ কানেকশন ও ইভেন্ট ====================
@@ -427,24 +432,21 @@ async function connectToWhatsApp() {
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
-            // 🛑 শুধুমাত্র #Stop কমান্ড হ্যান্ডলার (#Start রিমুভ করা হয়েছে)
             if (msg.key.fromMe) {
                 const cleanCmd = text.trim().toLowerCase();
 
                 if (cleanCmd === "#stop") {
-                    addStoppedUser(jid); // ChatFilter.json-এ পার্মানেন্ট যুক্ত করা
+                    addStoppedUser(jid);
                     pausedUsers.set(jid, Infinity);
                     const sent = await sock.sendMessage(jid, { text: "🛑 এই চ্যাটে এআই বট স্থায়ীভাবে বন্ধ করা হলো।" });
                     if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                     return;
                 }
 
-                // এডমিন নিজে কোনো সাধারণ কথা লিখলে সাময়িক ৩০ মিনিটের পজ
                 pausedUsers.set(jid, Date.now() + 30 * 60 * 1000);
                 continue;
             }
 
-            // 🚫 ChatFilter.json চেক: যদি এই একাউন্ট বন্ধ থাকে, বট আজীবন চুপ থাকবে
             if (isChatFiltered(jid)) continue;
 
             if (pausedUsers.has(jid)) {
