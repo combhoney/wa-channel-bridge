@@ -32,6 +32,7 @@ const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
 const chatHistories = new Map();
 const pausedUsers = new Map();
+const lastSentReplies = new Map(); // একই উত্তরের পুনরাবৃত্তি আটকানোর জন্য
 const botSentMessageIds = new Set();
 
 const KNOWN_INVITES = [
@@ -40,7 +41,7 @@ const KNOWN_INVITES = [
     "0029VbDIfE217EmxC6bLbb3A"
 ];
 
-// ==================== ChatFilter.json হ্যান্ডলার (#Stop পার্মানেন্ট) ====================
+// ==================== ChatFilter.json হ্যান্ডলার (#Stop সাইলেন্ট) ====================
 const CHAT_FILTER_FILE = './ChatFilter.json';
 
 function getStoppedUsersList() {
@@ -59,7 +60,7 @@ function addStoppedUser(jid) {
     list.add(jid);
     try {
         fs.writeFileSync(CHAT_FILTER_FILE, JSON.stringify(Array.from(list), null, 2));
-        console.log(`🛑 ChatFilter.json-এ পার্মানেন্ট স্টপ যোগ হয়েছে: ${jid}`);
+        console.log(`🤫 ChatFilter.json-এ সাইলেন্টলি স্টপ সেভ হয়েছে: ${jid}`);
     } catch (e) {
         console.error("ChatFilter.json write error:", e);
     }
@@ -270,20 +271,21 @@ async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia =
    - সরাসরি অফিসে গিয়ে জমা/ইন্টারভিউ হলে: "আমরা শুধু অনলাইনে আবেদন করে দিয়ে থাকি, আর এটাতে সরাসরি তাদের অফিসে গিয়ে কাগজপত্র জমা দিতে বলা হয়েছে।"
    - কাস্টমার যদি জিজ্ঞেস করে "আপনি পারবেন কিনা?": "না, আমরা শুধুমাত্র অনলাইনে যে আবেদনগুলো করার সুযোগ থাকে সেগুলোই আবেদন করে দিয়ে থাকি।"
    - যদি অনলাইন আবেদন হয়: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
-   - যদি কোনো বিষয়ে কনফিউজড হও, স্পষ্ট তথ্য না পাও বা নিশ্চিত না হও: অন্য কোনো কথা বানিয়ে বলবে না, সরাসরি বলবে: "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।"
+   - যদি কোনো বিষয়ে কনফিউজড হও বা নিশ্চিত না হও: "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।"
+   - যদি কাস্টমারের কথা অর্থহীন, অপ্রাসঙ্গিক বা চাকরির সাথে সম্পর্কহীন হয়: "চাকরির আবেদন সংক্রান্ত কোনো সাহায্য লাগলে বলুন।"
 
 ২. খরচ / ফি: খরচের কথা জানতে চাইলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনো অবস্থাতেই 'সার্ভিস চার্জ' বলবে না)।
 ৩. কাগজপত্র: কাস্টমার পূর্বে কাগজপত্র জমা দিয়ে থাকলে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তার কাছে আর নতুন করে কাগজপত্র চাইবে না।
 ${channelInstruction}
 ৪. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
 
-🧠 সেলফ-রিফ্লেকশন ও সংক্ষেপকরণ চিন্তা (Thinking Process):
-- উত্তর দেওয়ার আগে মনে মনে চিন্তা করো: "আমি এই উত্তরটি কি আরও ছোট ও সহজ করতে পারি? এটি কি ১ লাইনে শেষ করা সম্ভব?"
+🧠 সেলফ-রিফ্লেকশন (Thinking):
+- মনে মনে চিন্তা করো: "আমি এই উত্তরটি কি আরও ছোট করতে পারি? এটি কি ১ লাইনে শেষ করা সম্ভব?"
 - কোনো অপ্রাসঙ্গিক শুভেচ্ছা, বড় ভূমিকা বা বাড়তি বাক্য সম্পূর্ণ নিষিদ্ধ।
-- ভাবনার পর শুধুমাত্র চূড়ান্ত ১ লাইনের অতি-সংক্ষিপ্ত উত্তরটি প্রকাশ করবে।
+- শুধুমাত্র চূড়ান্ত ১ লাইনের অতি-সংক্ষিপ্ত উত্তরটি প্রকাশ করবে।
 
 ৫. প্রোফাইল নোট:
-কথোপকথন থেকে কাস্টমারের কোনো নতুন আগ্রহ বা তথ্য পেলে উত্তরের একদম শেষে লিখবে:
+কথোপকথন থেকে কাস্টমারের কোনো নতুন আগ্রহ বা তথ্য পেলে উত্তরের শেষে লিখবে:
 [PROFILE_UPDATE: {"interest": "আগ্রহের বিষয়", "docs_provided": true/false}]
 
 ${searchedJobInfo}
@@ -330,7 +332,6 @@ ${memoryContext}
                         model: currentModel,
                         messages: messagesToSend,
                         temperature: 0.1
-                        // max_tokens বাতিল করা হয়েছে যাতে কোনো বাক্য অর্ধেক কেটে না যায়
                     })
                 });
 
@@ -339,7 +340,6 @@ ${memoryContext}
                 let reply = data.choices?.[0]?.message?.content?.trim();
 
                 if (reply) {
-                    // DeepSeek বা Qwen-এর ইন্টারনাল <think> ট্যাগ থাকলে তা কাস্টমারকে না দেখিয়ে ক্লিন করা
                     reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
                     let linkSentNow = false;
@@ -412,12 +412,17 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        if (!m || !m.messages) return;
+        // 🔥 ফিক্স ১: রিস্টার্টের সময় পুরনো হিস্ট্রি মেসেজ ইগনোর করা
+        if (!m || !m.messages || m.type !== 'notify') return;
 
         for (const msg of m.messages) {
             const jid = msg.key?.remoteJid;
             const msgId = msg.key?.id;
             if (!jid) continue;
+
+            // 🔥 ফিক্স ২: ১ মিনিটের বেশি পুরানো মেসেজ সম্পূর্ণ ইগনোর করা (যাতে মেসেজ রিপিট না হয়)
+            const timestamp = (msg.messageTimestamp?.low || msg.messageTimestamp || 0) * 1000;
+            if (timestamp && (Date.now() - timestamp > 60000)) continue;
 
             if (jid.endsWith('@newsletter') || jid.startsWith('120363')) {
                 discoveredChannels.set(jid, jid);
@@ -432,14 +437,14 @@ async function connectToWhatsApp() {
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
+            // 🔥 ফিক্স ৩: সম্পূর্ণ সাইলেন্ট #Stop (চ্যাটে কোনো ফিরতি মেসেজ যাবে না!)
             if (msg.key.fromMe) {
                 const cleanCmd = text.trim().toLowerCase();
 
                 if (cleanCmd === "#stop") {
-                    addStoppedUser(jid);
+                    addStoppedUser(jid); // ChatFilter.json এ যুক্ত হবে
                     pausedUsers.set(jid, Infinity);
-                    const sent = await sock.sendMessage(jid, { text: "🛑 এই চ্যাটে এআই বট স্থায়ীভাবে বন্ধ করা হলো।" });
-                    if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+                    // 🤫 কোনো মেসেজ না পাঠিয়ে নীরবে রিটার্ন করবে!
                     return;
                 }
 
@@ -447,6 +452,7 @@ async function connectToWhatsApp() {
                 continue;
             }
 
+            // 🚫 ChatFilter চেক: বন্ধ থাকলে ১ অক্ষরের মেসেজও যাবে না
             if (isChatFiltered(jid)) continue;
 
             if (pausedUsers.has(jid)) {
@@ -482,6 +488,12 @@ async function connectToWhatsApp() {
 
             const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
 
+            // 🔥 ফিক্স ৪: একই মেসেজ পরপর দুইবার পাঠানো বন্ধ করা
+            if (lastSentReplies.get(jid) === aiResponse) {
+                try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
+                continue;
+            }
+
             await delay(2000);
 
             if (aiResponse.includes("[ALERT_ADMIN]")) {
@@ -499,7 +511,10 @@ async function connectToWhatsApp() {
             }
 
             const sent = await sock.sendMessage(jid, { text: aiResponse });
-            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+            if (sent?.key?.id) {
+                botSentMessageIds.add(sent.key.id);
+                lastSentReplies.set(jid, aiResponse);
+            }
 
             try {
                 await sock.sendPresenceUpdate('paused', jid);
