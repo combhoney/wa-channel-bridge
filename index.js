@@ -32,7 +32,7 @@ const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
 const chatHistories = new Map();
 const pausedUsers = new Map();
-const lastSentReplies = new Map(); // একই উত্তরের পুনরাবৃত্তি আটকানোর জন্য
+const lastSentReplies = new Map();
 const botSentMessageIds = new Set();
 
 const KNOWN_INVITES = [
@@ -40,6 +40,29 @@ const KNOWN_INVITES = [
     "0029VbDN5b3CsU9XlRYVRq0s",
     "0029VbDIfE217EmxC6bLbb3A"
 ];
+
+// ==================== মাস্টার অন/অফ সুইচ (bot_status.json) ====================
+// সার্ভার রিস্টার্ট না করে ডিসকানেক্টের ঝুঁকি ছাড়াই নিয়ন্ত্রণ
+const BOT_STATUS_FILE = './bot_status.json';
+
+function isBotGloballyActive() {
+    if (!fs.existsSync(BOT_STATUS_FILE)) return true; // ডিফল্টভাবে অন থাকবে
+    try {
+        const data = JSON.parse(fs.readFileSync(BOT_STATUS_FILE, 'utf-8'));
+        return data.active !== false;
+    } catch (e) {
+        return true;
+    }
+}
+
+function setGlobalBotStatus(status) {
+    try {
+        fs.writeFileSync(BOT_STATUS_FILE, JSON.stringify({ active: status, time: Date.now() }, null, 2));
+        console.log(`🎛️ মাস্টার সুইচ: এআই অটো-রিপ্লাই ${status ? 'চালু (ON)' : 'বন্ধ (OFF)'} করা হয়েছে।`);
+    } catch (e) {
+        console.error("bot_status.json write error:", e);
+    }
+}
 
 // ==================== ChatFilter.json হ্যান্ডলার (#Stop সাইলেন্ট) ====================
 const CHAT_FILTER_FILE = './ChatFilter.json';
@@ -272,7 +295,7 @@ async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia =
    - কাস্টমার যদি জিজ্ঞেস করে "আপনি পারবেন কিনা?": "না, আমরা শুধুমাত্র অনলাইনে যে আবেদনগুলো করার সুযোগ থাকে সেগুলোই আবেদন করে দিয়ে থাকি।"
    - যদি অনলাইন আবেদন হয়: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
    - যদি কোনো বিষয়ে কনফিউজড হও বা নিশ্চিত না হও: "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।"
-   - যদি কাস্টমারের কথা অর্থহীন, অপ্রাসঙ্গিক বা চাকরির সাথে সম্পর্কহীন হয়: "চাকরির আবেদন সংক্রান্ত কোনো সাহায্য লাগলে বলুন।"
+   - যদি কাস্টমারের কথা অর্থহীন বা চাকরির সাথে সম্পর্কহীন হয়: "চাকরির আবেদন সংক্রান্ত কোনো সাহায্য লাগলে বলুন।"
 
 ২. খরচ / ফি: খরচের কথা জানতে চাইলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনো অবস্থাতেই 'সার্ভিস চার্জ' বলবে না)।
 ৩. কাগজপত্র: কাস্টমার পূর্বে কাগজপত্র জমা দিয়ে থাকলে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তার কাছে আর নতুন করে কাগজপত্র চাইবে না।
@@ -394,6 +417,9 @@ async function connectToWhatsApp() {
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('call', async (calls) => {
+        // মাস্টার সুইচ অফ থাকলে কল মেসেজ পাঠাবে না
+        if (!isBotGloballyActive()) return;
+
         for (const call of calls) {
             if (call.status === 'offer') {
                 const callerJid = call.from;
@@ -412,7 +438,6 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        // 🔥 ফিক্স ১: রিস্টার্টের সময় পুরনো হিস্ট্রি মেসেজ ইগনোর করা
         if (!m || !m.messages || m.type !== 'notify') return;
 
         for (const msg of m.messages) {
@@ -420,7 +445,6 @@ async function connectToWhatsApp() {
             const msgId = msg.key?.id;
             if (!jid) continue;
 
-            // 🔥 ফিক্স ২: ১ মিনিটের বেশি পুরানো মেসেজ সম্পূর্ণ ইগনোর করা (যাতে মেসেজ রিপিট না হয়)
             const timestamp = (msg.messageTimestamp?.low || msg.messageTimestamp || 0) * 1000;
             if (timestamp && (Date.now() - timestamp > 60000)) continue;
 
@@ -437,14 +461,26 @@ async function connectToWhatsApp() {
 
             const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
 
-            // 🔥 ফিক্স ৩: সম্পূর্ণ সাইলেন্ট #Stop (চ্যাটে কোনো ফিরতি মেসেজ যাবে না!)
+            // 👑 এডমিনের নিজের পাঠানো মেসেজ থেকে মাস্টার সুইচ হ্যান্ডলিং
             if (msg.key.fromMe) {
                 const cleanCmd = text.trim().toLowerCase();
 
+                // 🛑 গ্লোবাল অফ: #off লিখলে পুরো বট অফ হবে (ডিসকানেক্ট ছাড়া)
+                if (cleanCmd === "#off") {
+                    setGlobalBotStatus(false);
+                    return;
+                }
+
+                // ✅ গ্লোবাল অন: #on লিখলে আবার পুরো বট অন হবে
+                if (cleanCmd === "#on") {
+                    setGlobalBotStatus(true);
+                    return;
+                }
+
+                // নির্দিষ্ট ব্যক্তির জন্য স্টপ: #stop
                 if (cleanCmd === "#stop") {
-                    addStoppedUser(jid); // ChatFilter.json এ যুক্ত হবে
+                    addStoppedUser(jid);
                     pausedUsers.set(jid, Infinity);
-                    // 🤫 কোনো মেসেজ না পাঠিয়ে নীরবে রিটার্ন করবে!
                     return;
                 }
 
@@ -452,7 +488,11 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            // 🚫 ChatFilter চেক: বন্ধ থাকলে ১ অক্ষরের মেসেজও যাবে না
+            // 🛑 মাস্টার সুইচ চেক: যদি আপনি #off করে রাখেন, এআই কোনো কাস্টমারকে উত্তর দেবে না
+            if (!isBotGloballyActive()) {
+                continue;
+            }
+
             if (isChatFiltered(jid)) continue;
 
             if (pausedUsers.has(jid)) {
@@ -488,7 +528,6 @@ async function connectToWhatsApp() {
 
             const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
 
-            // 🔥 ফিক্স ৪: একই মেসেজ পরপর দুইবার পাঠানো বন্ধ করা
             if (lastSentReplies.get(jid) === aiResponse) {
                 try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
                 continue;
@@ -590,6 +629,7 @@ async function getJidFromInvite(code) {
     return null;
 }
 
+// 📢 হোয়াটসঅ্যাপ চ্যানেলে পোস্ট করার রুট (২৪/৭ চলবে, কখনোই ডিসকানেক্ট হবে না)
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text, images } = req.body;
