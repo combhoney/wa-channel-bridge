@@ -183,19 +183,18 @@ async function searchJobOnline(userMessage) {
     return null;
 }
 
-// ==================== এআই ক্লাসিফায়ার (শুধুমাত্র ক্যাটাগরি বের করবে) ====================
+// ==================== এআই ক্লাসিফায়ার (আবেদন পদ্ধতি নির্ণয়) ====================
 async function classifyJobMethod(articleText, base64Image = null) {
     const systemPrompt = `
-You are a job application method classifier.
-Read the job circular details carefully and classify the application method into EXACTLY ONE of these 4 categories:
+You are a strict job application method classifier.
+Read the job circular and classify the application method into EXACTLY ONE category:
 1. ONLINE (If applied via website, online portal, or teletalk online form)
-2. FORM (If applied by sending physical form or documents via POST OFFICE / ডাকযোগে / কুরিয়ার)
-3. WALKIN (If walk-in interview, or must physically go to their office for interview/document submission on specified dates)
+2. FORM (If applied by sending physical form/documents via POST OFFICE / ডাকযোগে / কুরিয়ার)
+3. WALKIN (If walk-in interview, or must physically visit office for interview/document submission on specified dates)
 4. BSL (If it is from BOESL / বোয়েসেল for overseas employment)
 
 CRITICAL RULE:
 Respond with ONLY ONE WORD: ONLINE, FORM, WALKIN, or BSL.
-Do not write any explanation or punctuation.
 `;
 
     let userContent;
@@ -241,7 +240,7 @@ Do not write any explanation or punctuation.
             } catch (err) {}
         }
     }
-    return "ONLINE"; // ডিফল্ট ক্যাটাগরি
+    return "ONLINE";
 }
 
 // ==================== হোয়াটসঅ্যাপ কানেকশন ও হ্যান্ডলার ====================
@@ -270,7 +269,6 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // মেসেজ রিসিভ
     sock.ev.on('messages.upsert', async (m) => {
         if (!m || !m.messages || m.type !== 'notify') return;
 
@@ -295,7 +293,7 @@ async function connectToWhatsApp() {
 
             const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "").trim();
 
-            // এডমিনের কন্ট্রোল কমান্ড (#off, #on, #stop)
+            // এডমিন কমান্ড
             if (msg.key.fromMe) {
                 const cleanCmd = text.toLowerCase();
                 if (cleanCmd === "#off") { setGlobalBotStatus(false); return; }
@@ -305,11 +303,8 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            // 🛑 মাস্টার সুইচ চেক
             if (!isBotGloballyActive()) continue;
-
-            // 🚫 এই কাস্টমারকে কি পূর্বে টেমপ্লেট টেক্সট দেওয়া হয়েছে? হলে বট আজীবনের জন্য চুপ থাকবে!
-            if (isChatFiltered(jid)) continue;
+            if (isChatFiltered(jid)) continue; // ইতোমধ্যে ফাইল দেওয়া থাকলে আজীবন বন্ধ থাকবে
 
             if (pausedUsers.has(jid)) {
                 if (Date.now() < pausedUsers.get(jid)) continue;
@@ -336,16 +331,34 @@ async function connectToWhatsApp() {
 
             if (!text && !base64Image && !extractedPdfText) continue;
 
-            // ==================== ধাপ ১: সাধারণ কুশল বিনিময় (শুধুমাত্র সালাম/হাই) ====================
-            const lowerText = text.toLowerCase();
-            const isPureGreeting = /^(সালাম|আসসালামু\s*আলাইকুম|assalam|salam|slm|হাই|হ্যালো|hello|hi|hlw|kemon asen|kmn asen|কেমন আছেন|ভালো আছেন)[\s!?.]*$/i.test(text);
+            // ==================== ফিল্টার ১: কাস্টমার কি আসলেই চাকরির বিষয়ে কিছু জানতে চেয়েছে? ====================
+            // এই শব্দগুলো থাকলে নিশ্চিত হওয়া যাবে যে এটি চাকরির আলোচনা
+            const isActualJobInquiry = /(চাকরি|নিয়োগ|নিয়োগ|সার্কুলার|আবেদন|বিজ্ঞপ্তি|ভ্যাকেন্সি|জব|পদ|বোয়েসেল|বোয়েসেল|boesl|apply|circular|job|vacancy|post)/i.test(text) || base64Image !== null || extractedPdfText.length > 0;
 
-            if (isPureGreeting && !base64Image && !extractedPdfText) {
-                let greetingReply = "জি ভাই, বলুন কীভাবে সাহায্য করতে পারি?";
-                if (/সালাম|আসসালামু|salam|assalam|slm/i.test(text)) {
+            // ==================== ফিল্টার ২: কুশল বিনিময় ও সাধারণ কথা হ্যান্ডলার ====================
+            // যদি এটি কোনো চাকরির প্রশ্ন না হয়, তবে কোনো ফাইল পাঠানো বা লক করা কঠোরভাবে নিষিদ্ধ!
+            if (!isActualJobInquiry) {
+                let greetingReply = "";
+
+                // সালাম
+                if (/সালাম|আসসালামু|assalam|salam|slm/i.test(text)) {
                     greetingReply = "ওয়ালাইকুম আসসালাম।";
-                } else if (/কেমন আছেন|kemon asen|kmn asen|ভালো আছেন/i.test(text)) {
+                }
+                // কি খবর / কি অবস্থা
+                else if (/কি খবর|ki khobor|ki obostha|কি অবস্থা/i.test(text)) {
+                    greetingReply = "আলহামদুলিল্লাহ ভালো ভাই, আপনার কি খবর? কোনো চাকরির বিষয়ে সাহায্য লাগলে বলুন।";
+                }
+                // কেমন আছেন
+                else if (/কেমন আছেন|kemon asen|kmn asen|ভালো আছেন/i.test(text)) {
                     greetingReply = "আলহামদুলিল্লাহ, ভালো আছি।";
+                }
+                // হাই / হ্যালো / ডাকাডাকি
+                else if (/^(হাই|হ্যালো|hello|hi|hlw|helo|ভাই|vai|bhai|ভাইয়া)[\s!?.]*$/i.test(text)) {
+                    greetingReply = "জি ভাই, বলুন কীভাবে সাহায্য করতে পারি?";
+                }
+                // অন্য যেকোনো অস্পষ্ট বা সাধারণ কথা
+                else {
+                    greetingReply = "জি ভাই, কোনো চাকরির আবেদন বা সার্কুলার নিয়ে সাহায্য লাগলে জানান।";
                 }
 
                 try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
@@ -353,34 +366,34 @@ async function connectToWhatsApp() {
                 const sent = await sock.sendMessage(jid, { text: greetingReply });
                 if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                 try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
-                continue; // কুশল বিনিময় শেষে কাস্টমারের পরবর্তী মূল প্রশ্নের অপেক্ষা করবে
+
+                // 🔥 মনে রাখবেন: সাধারণ কথায় কাস্টমারকে লক করা হবে না! সে পরবর্তী মূল প্রশ্ন করতে পারবে।
+                continue;
             }
 
-            // ==================== ধাপ ২: নিয়োগ সম্পর্কিত প্রশ্ন বা আবেদন পদ্ধতি যাচাই ====================
+            // ==================== ফিল্টার ৩: শুধুমাত্র চাকরির ক্ষেত্রে পদ্ধতি যাচাই ও টেক্সট ফাইল পাঠানো ====================
             try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
 
             let methodCategory = "ONLINE";
 
-            // ক) যদি বোয়েসেল সম্পর্কিত হয়
+            // ক) বোয়েসেল
             if (/বোয়েসেল|বোয়েসেল|boesl/i.test(text)) {
                 methodCategory = "BSL";
             } 
-            // খ) যদি ছবি বা পিডিএফ পাঠায়
+            // খ) ছবি বা পিডিএফ
             else if (base64Image || extractedPdfText) {
                 methodCategory = await classifyJobMethod(extractedPdfText, base64Image);
             } 
-            // গ) যদি চাকরির নাম লিখে সার্চ করতে হয়
+            // গ) চাকরির নাম দিয়ে সার্চ
             else {
                 const article = await searchJobOnline(text);
                 if (article) {
                     methodCategory = await classifyJobMethod(article, null);
                 } else {
-                    // নির্দিষ্ট না পেলে টেক্সট থেকেই ক্লাসিফাই করবে
                     methodCategory = await classifyJobMethod(text, null);
                 }
             }
 
-            // ==================== ধাপ ৩: উপযুক্ত টেক্সট ফাইল থেকে মেসেজ ডেলিভারি ====================
             let finalReply = "";
 
             if (methodCategory === "WALKIN") {
@@ -390,21 +403,20 @@ async function connectToWhatsApp() {
             } else if (methodCategory === "BSL") {
                 finalReply = getFileContent("bsl.txt", "বোয়েসেলের এই নিয়োগে তাদের নিয়ম অনুযায়ী আবেদন সম্পন্ন করতে হবে।");
             } else {
-                // ডিফল্ট অনলাইন আবেদন
                 finalReply = getFileContent("online.txt", "হ্যাঁ ভাই, এটা আমরা অনলাইনে আবেদন করে দিতে পারব। আপনার প্রয়োজনীয় কাগজপত্র পাঠিয়ে দিন।");
             }
 
             await delay(2000);
 
-            // টেক্সট ফাইল থেকে হুবহু মেসেজটি পাঠিয়ে দেওয়া
+            // শুধু একবার ফাইল ডেলিভারি
             const sent = await sock.sendMessage(jid, { text: finalReply });
             if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
             try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
 
-            // 🔒 অতি গুরুত্বপূর্ণ: টেক্সট পাঠানো শেষ! এই কাস্টমারকে আজীবনের জন্য লক করা হলো।
+            // 🛑 ফাইল পাঠানো শেষ ➡️ এই কাস্টমার আজীবনের জন্য লক!
             addStoppedUser(jid);
             pausedUsers.set(jid, Infinity);
-            console.log(`🛑 ${jid} নম্বরে ${methodCategory} টেমপ্লেট পাঠানো হয়েছে এবং বট পার্মানেন্ট পজ করা হয়েছে।`);
+            console.log(`✅ [ডেলিভারি সম্পন্ন] ${jid} কে ${methodCategory} পাঠানো হয়েছে এবং লক করা হয়েছে।`);
         }
     });
 
@@ -476,7 +488,6 @@ async function getJidFromInvite(code) {
     return null;
 }
 
-// 📢 চ্যানেলে অটো-পোস্ট রুট (২৪/৭ চালু থাকবে)
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text, images } = req.body;
