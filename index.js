@@ -28,11 +28,8 @@ const MODELS = (process.env.LLM_MODELS || process.env.LLM_MODEL || DEFAULT_MODEL
     .filter(Boolean);
 
 const LLM_API_URL = process.env.LLM_API_URL || "https://ollama.com/v1/chat/completions";
-const CHANNEL_LINK = "https://whatsapp.com/channel/0029VbDIfE217EmxC6bLbb3A";
 
-const chatHistories = new Map();
 const pausedUsers = new Map();
-const lastSentReplies = new Map();
 const botSentMessageIds = new Set();
 
 const KNOWN_INVITES = [
@@ -42,11 +39,10 @@ const KNOWN_INVITES = [
 ];
 
 // ==================== মাস্টার অন/অফ সুইচ (bot_status.json) ====================
-// সার্ভার রিস্টার্ট না করে ডিসকানেক্টের ঝুঁকি ছাড়াই নিয়ন্ত্রণ
 const BOT_STATUS_FILE = './bot_status.json';
 
 function isBotGloballyActive() {
-    if (!fs.existsSync(BOT_STATUS_FILE)) return true; // ডিফল্টভাবে অন থাকবে
+    if (!fs.existsSync(BOT_STATUS_FILE)) return true;
     try {
         const data = JSON.parse(fs.readFileSync(BOT_STATUS_FILE, 'utf-8'));
         return data.active !== false;
@@ -58,13 +54,10 @@ function isBotGloballyActive() {
 function setGlobalBotStatus(status) {
     try {
         fs.writeFileSync(BOT_STATUS_FILE, JSON.stringify({ active: status, time: Date.now() }, null, 2));
-        console.log(`🎛️ মাস্টার সুইচ: এআই অটো-রিপ্লাই ${status ? 'চালু (ON)' : 'বন্ধ (OFF)'} করা হয়েছে।`);
-    } catch (e) {
-        console.error("bot_status.json write error:", e);
-    }
+    } catch (e) {}
 }
 
-// ==================== ChatFilter.json হ্যান্ডলার (#Stop সাইলেন্ট) ====================
+// ==================== ChatFilter.json (যাদের অলরেডি টেমপ্লেট দেওয়া হয়েছে) ====================
 const CHAT_FILTER_FILE = './ChatFilter.json';
 
 function getStoppedUsersList() {
@@ -83,10 +76,7 @@ function addStoppedUser(jid) {
     list.add(jid);
     try {
         fs.writeFileSync(CHAT_FILTER_FILE, JSON.stringify(Array.from(list), null, 2));
-        console.log(`🤫 ChatFilter.json-এ সাইলেন্টলি স্টপ সেভ হয়েছে: ${jid}`);
-    } catch (e) {
-        console.error("ChatFilter.json write error:", e);
-    }
+    } catch (e) {}
 }
 
 function isChatFiltered(jid) {
@@ -94,74 +84,16 @@ function isChatFiltered(jid) {
     return list.has(jid);
 }
 
-// ==================== history.json পার্মানেন্ট মেমোরি হ্যান্ডলার ====================
-const HISTORY_FILE = './history.json';
-const SIX_MONTHS_MS = 180 * 24 * 60 * 60 * 1000;
-
-function getCustomerMemory(userPhone) {
-    if (!fs.existsSync(HISTORY_FILE)) return null;
-    try {
-        const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
-        return data[userPhone] || null;
-    } catch (e) {
-        return null;
-    }
-}
-
-function saveDynamicMemory(userPhone, profileUpdate = {}, hasMedia = false, linkSent = false) {
-    let data = {};
-    if (fs.existsSync(HISTORY_FILE)) {
+// ==================== নির্দিষ্ট টেক্সট ফাইল থেকে মেসেজ পড়ার ফাংশন ====================
+function getFileContent(fileName, defaultText) {
+    const path = `./${fileName}`;
+    if (fs.existsSync(path)) {
         try {
-            data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
-        } catch (e) {
-            data = {};
-        }
+            const content = fs.readFileSync(path, 'utf-8').trim();
+            if (content.length > 0) return content;
+        } catch (e) {}
     }
-
-    const now = Date.now();
-
-    for (const [phone, profile] of Object.entries(data)) {
-        if (profile.last_active && (now - profile.last_active > SIX_MONTHS_MS)) {
-            delete data[phone];
-        }
-    }
-
-    const current = data[userPhone] || {
-        last_active: now,
-        interests: [],
-        docs_provided: false,
-        channel_link_sent: false,
-        notes: ""
-    };
-
-    current.last_active = now;
-
-    if (hasMedia || profileUpdate.docs_provided === true) {
-        current.docs_provided = true;
-    }
-
-    if (linkSent || profileUpdate.channel_link_sent === true) {
-        current.channel_link_sent = true;
-    }
-
-    if (profileUpdate.interest && typeof profileUpdate.interest === 'string') {
-        const newInt = profileUpdate.interest.trim();
-        if (newInt && !current.interests.includes(newInt)) {
-            current.interests.push(newInt);
-        }
-    }
-
-    if (profileUpdate.note) {
-        current.notes = current.notes ? `${current.notes}; ${profileUpdate.note}` : profileUpdate.note;
-    }
-
-    data[userPhone] = current;
-
-    try {
-        fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2));
-    } catch (e) {
-        console.error("history.json write error:", e);
-    }
+    return defaultText;
 }
 
 // ==================== সার্কুলার স্ক্র্যাপার ও রিয়েল-টাইম সার্চ ====================
@@ -200,7 +132,7 @@ async function fetchLastTwoMonthsJobs() {
                     allJobs.push({
                         title: post.title.rendered,
                         date: post.date.split('T')[0],
-                        details: cleanHTML(post.content?.rendered || post.excerpt?.rendered || "").slice(0, 500),
+                        details: cleanHTML(post.content?.rendered || post.excerpt?.rendered || "").slice(0, 1000),
                         link: post.link
                     });
                 }
@@ -217,8 +149,6 @@ async function fetchLastTwoMonthsJobs() {
 }
 
 async function searchJobOnline(userMessage) {
-    if (userMessage.length < 4) return null;
-
     const cleanQuery = userMessage
         .replace(/(আবেদন|কিভাবে|করব|করতে|চাই|চাকরি|নিয়োগ|সার্কুলার|সম্পর্কে|জানতে|ভাই|বট|হবে|কি|আছে|তথ্য|প্লিজ)/gi, '')
         .trim();
@@ -245,100 +175,38 @@ async function searchJobOnline(userMessage) {
                 if (posts && posts.length > 0) {
                     const p = posts[0];
                     const fullText = cleanHTML(p.content?.rendered || p.excerpt?.rendered || "");
-                    return `বিজ্ঞপ্তি: ${p.title.rendered}\nনিয়মাবলী: ${fullText.slice(0, 1000)}`;
+                    return `বিজ্ঞপ্তি: ${p.title.rendered}\nনিয়মাবলী: ${fullText.slice(0, 1500)}`;
                 }
             }
         } catch (err) {}
     }
-
     return null;
 }
 
-// ==================== এআই লজিক ও সেলফ-রিফ্লেকশন ====================
-async function getAIReply(userPhone, userMessage, base64Image = null, hasMedia = false) {
-    const userMemory = getCustomerMemory(userPhone);
-    const alreadyGotChannelLink = userMemory?.channel_link_sent === true;
-
-    const isJobInquiry = /(চাকরি|নিয়োগ|সার্কুলার|আবেদন|পদ|job|circular|apply)/i.test(userMessage) || base64Image !== null;
-
-    let searchedJobInfo = "";
-    if (!base64Image && isJobInquiry) {
-        const found = await searchJobOnline(userMessage);
-        if (found) {
-            searchedJobInfo = `\n[সার্কুলার তথ্য]:\n${found}\n`;
-        }
-    }
-
-    let memoryContext = "";
-    if (userMemory) {
-        memoryContext = `
-[কাস্টমার রেকর্ড]:
-- পছন্দ: ${userMemory.interests?.length > 0 ? userMemory.interests.join(", ") : "জানা নেই"}
-- কাগজপত্র জমা আছে কি না: ${userMemory.docs_provided ? "হ্যাঁ, পূর্বে দিয়েছে (নতুন করে চাইবে না)" : "না"}
-`;
-    }
-
-    let channelInstruction = "";
-    if (!alreadyGotChannelLink && isJobInquiry) {
-        channelInstruction = `\n- যেহেতু কাস্টমার নিয়োগ নিয়ে জানতে চেয়েছে এবং পূর্বে লিংক পায়নি, তাই উত্তরের সাথে একবার লিংক দাও: "${CHANNEL_LINK}"`;
-    } else {
-        channelInstruction = `\n- চ্যানেলের কোনো লিংক দেবে না।`;
-    }
-
+// ==================== এআই ক্লাসিফায়ার (শুধুমাত্র ক্যাটাগরি বের করবে) ====================
+async function classifyJobMethod(articleText, base64Image = null) {
     const systemPrompt = `
-তুমি একজন অনলাইন চাকরির আবেদন সহকারী। আমরা শুধুমাত্র "অনলাইন আবেদন"-এর সার্ভিস প্রদান করি।
+You are a job application method classifier.
+Read the job circular details carefully and classify the application method into EXACTLY ONE of these 4 categories:
+1. ONLINE (If applied via website, online portal, or teletalk online form)
+2. FORM (If applied by sending physical form or documents via POST OFFICE / ডাকযোগে / কুরিয়ার)
+3. WALKIN (If walk-in interview, or must physically go to their office for interview/document submission on specified dates)
+4. BSL (If it is from BOESL / বোয়েসেল for overseas employment)
 
-🚨 অতি-গুরুত্বপূর্ণ ব্যবসায়িক নিয়মাবলী:
-১. বিজ্ঞপ্তির মাধ্যম যাচাই ও উত্তর:
-   - ডাকযোগে হলে: "আমরা শুধু অনলাইনে আবেদন করে দিয়ে থাকি, আর আপনি যে নিয়োগটি দিয়েছেন এটাতে বলা হয়েছে ডাকযোগে আপনার ডকুমেন্টসগুলো পাঠাতে।"
-   - সরাসরি অফিসে গিয়ে জমা/ইন্টারভিউ হলে: "আমরা শুধু অনলাইনে আবেদন করে দিয়ে থাকি, আর এটাতে সরাসরি তাদের অফিসে গিয়ে কাগজপত্র জমা দিতে বলা হয়েছে।"
-   - কাস্টমার যদি জিজ্ঞেস করে "আপনি পারবেন কিনা?": "না, আমরা শুধুমাত্র অনলাইনে যে আবেদনগুলো করার সুযোগ থাকে সেগুলোই আবেদন করে দিয়ে থাকি।"
-   - যদি অনলাইন আবেদন হয়: "হ্যাঁ ভাই, এটা অনলাইনে আবেদন করা যাবে। আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।"
-   - যদি কোনো বিষয়ে কনফিউজড হও বা নিশ্চিত না হও: "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।"
-   - যদি কাস্টমারের কথা অর্থহীন বা চাকরির সাথে সম্পর্কহীন হয়: "চাকরির আবেদন সংক্রান্ত কোনো সাহায্য লাগলে বলুন।"
-
-২. খরচ / ফি: খরচের কথা জানতে চাইলে সরাসরি বলবে: "আবেদন ফি এর সাথে ১০০ টাকা খরচ লাগবে।" (কোনো অবস্থাতেই 'সার্ভিস চার্জ' বলবে না)।
-৩. কাগজপত্র: কাস্টমার পূর্বে কাগজপত্র জমা দিয়ে থাকলে (${userMemory?.docs_provided ? "হ্যাঁ দিয়েছে" : "না দেয় নাই"}), তার কাছে আর নতুন করে কাগজপত্র চাইবে না।
-${channelInstruction}
-৪. পেমেন্ট আলোচনা: বিকাশ/নগদ নম্বর চাইলে বলবে "পেমেন্টের জন্য আমাদের প্রতিনিধি শীঘ্রই যোগাযোগ করছেন।" এবং শেষে [ALERT_ADMIN] লিখবে।
-
-🧠 সেলফ-রিফ্লেকশন (Thinking):
-- মনে মনে চিন্তা করো: "আমি এই উত্তরটি কি আরও ছোট করতে পারি? এটি কি ১ লাইনে শেষ করা সম্ভব?"
-- কোনো অপ্রাসঙ্গিক শুভেচ্ছা, বড় ভূমিকা বা বাড়তি বাক্য সম্পূর্ণ নিষিদ্ধ।
-- শুধুমাত্র চূড়ান্ত ১ লাইনের অতি-সংক্ষিপ্ত উত্তরটি প্রকাশ করবে।
-
-৫. প্রোফাইল নোট:
-কথোপকথন থেকে কাস্টমারের কোনো নতুন আগ্রহ বা তথ্য পেলে উত্তরের শেষে লিখবে:
-[PROFILE_UPDATE: {"interest": "আগ্রহের বিষয়", "docs_provided": true/false}]
-
-${searchedJobInfo}
-${memoryContext}
+CRITICAL RULE:
+Respond with ONLY ONE WORD: ONLINE, FORM, WALKIN, or BSL.
+Do not write any explanation or punctuation.
 `;
 
-    if (!chatHistories.has(userPhone)) {
-        chatHistories.set(userPhone, []);
-    }
-    const history = chatHistories.get(userPhone);
-
-    let currentContent;
+    let userContent;
     if (base64Image) {
-        currentContent = [
-            { type: "text", text: userMessage || "বিজ্ঞপ্তিটি দেখে ১ লাইনে জানাও এটা অনলাইন আবেদন, নাকি ডাকযোগে বা সরাসরি অফিসে যেতে হবে?" },
+        userContent = [
+            { type: "text", text: "Classify this job circular: ONLINE, FORM, WALKIN, or BSL?" },
             { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
         ];
     } else {
-        currentContent = userMessage;
+        userContent = `Job Circular Content:\n${articleText}`;
     }
-
-    history.push({ role: "user", content: currentContent });
-    if (history.length > 6) history.shift();
-
-    const messagesToSend = [
-        { role: "system", content: systemPrompt },
-        ...history
-    ];
-
-    if (API_KEYS.length === 0) return "API Key পাওয়া যায়নি।";
 
     for (let k = 0; k < API_KEYS.length; k++) {
         const currentKey = API_KEYS[k];
@@ -353,44 +221,30 @@ ${memoryContext}
                     },
                     body: JSON.stringify({
                         model: currentModel,
-                        messages: messagesToSend,
-                        temperature: 0.1
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            { role: "user", content: userContent }
+                        ],
+                        temperature: 0.0
                     })
                 });
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
-                let reply = data.choices?.[0]?.message?.content?.trim();
+                let result = data.choices?.[0]?.message?.content?.trim().toUpperCase() || "";
+                result = result.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-                if (reply) {
-                    reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-                    let linkSentNow = false;
-                    if (reply.includes(CHANNEL_LINK)) {
-                        linkSentNow = true;
-                    }
-
-                    const profileMatch = reply.match(/\[PROFILE_UPDATE:\s*({.*?})\]/s);
-                    if (profileMatch) {
-                        try {
-                            const updateObj = JSON.parse(profileMatch[1]);
-                            saveDynamicMemory(userPhone, updateObj, hasMedia, linkSentNow);
-                        } catch (e) {}
-                        reply = reply.replace(/\[PROFILE_UPDATE:\s*({.*?})\]/s, '').trim();
-                    } else {
-                        saveDynamicMemory(userPhone, {}, hasMedia, linkSentNow);
-                    }
-
-                    history.push({ role: "assistant", content: reply });
-                    return reply;
-                }
+                if (result.includes("WALKIN") || result.includes("WALK-IN")) return "WALKIN";
+                if (result.includes("FORM") || result.includes("POST") || result.includes("DAK")) return "FORM";
+                if (result.includes("BSL") || result.includes("BOESL")) return "BSL";
+                if (result.includes("ONLINE")) return "ONLINE";
             } catch (err) {}
         }
     }
-    return "শীঘ্রই আমাদের একজন প্রতিনিধি আপনার সাথে যোগাযোগ করবে।";
+    return "ONLINE"; // ডিফল্ট ক্যাটাগরি
 }
 
-// ==================== হোয়াটসঅ্যাপ কানেকশন ও ইভেন্ট ====================
+// ==================== হোয়াটসঅ্যাপ কানেকশন ও হ্যান্ডলার ====================
 async function syncKnownChannels() {
     if (!sock) return;
     for (const code of KNOWN_INVITES) {
@@ -416,27 +270,7 @@ async function connectToWhatsApp() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('call', async (calls) => {
-        // মাস্টার সুইচ অফ থাকলে কল মেসেজ পাঠাবে না
-        if (!isBotGloballyActive()) return;
-
-        for (const call of calls) {
-            if (call.status === 'offer') {
-                const callerJid = call.from;
-                if (isChatFiltered(callerJid)) continue;
-
-                try {
-                    await sock.sendPresenceUpdate('composing', callerJid);
-                    await delay(1500);
-                } catch (e) {}
-                const sentMsg = await sock.sendMessage(callerJid, {
-                    text: "দয়া করে কল না দিয়ে আপনার বিষয়টি মেসেজে লিখে জানান ভাই, আমরা মেসেজেই সাহায্য করব।"
-                });
-                if (sentMsg?.key?.id) botSentMessageIds.add(sentMsg.key.id);
-            }
-        }
-    });
-
+    // মেসেজ রিসিভ
     sock.ev.on('messages.upsert', async (m) => {
         if (!m || !m.messages || m.type !== 'notify') return;
 
@@ -459,40 +293,22 @@ async function connectToWhatsApp() {
                 continue;
             }
 
-            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "";
+            const text = (msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || "").trim();
 
-            // 👑 এডমিনের নিজের পাঠানো মেসেজ থেকে মাস্টার সুইচ হ্যান্ডলিং
+            // এডমিনের কন্ট্রোল কমান্ড (#off, #on, #stop)
             if (msg.key.fromMe) {
-                const cleanCmd = text.trim().toLowerCase();
-
-                // 🛑 গ্লোবাল অফ: #off লিখলে পুরো বট অফ হবে (ডিসকানেক্ট ছাড়া)
-                if (cleanCmd === "#off") {
-                    setGlobalBotStatus(false);
-                    return;
-                }
-
-                // ✅ গ্লোবাল অন: #on লিখলে আবার পুরো বট অন হবে
-                if (cleanCmd === "#on") {
-                    setGlobalBotStatus(true);
-                    return;
-                }
-
-                // নির্দিষ্ট ব্যক্তির জন্য স্টপ: #stop
-                if (cleanCmd === "#stop") {
-                    addStoppedUser(jid);
-                    pausedUsers.set(jid, Infinity);
-                    return;
-                }
-
+                const cleanCmd = text.toLowerCase();
+                if (cleanCmd === "#off") { setGlobalBotStatus(false); return; }
+                if (cleanCmd === "#on") { setGlobalBotStatus(true); return; }
+                if (cleanCmd === "#stop") { addStoppedUser(jid); pausedUsers.set(jid, Infinity); return; }
                 pausedUsers.set(jid, Date.now() + 30 * 60 * 1000);
                 continue;
             }
 
-            // 🛑 মাস্টার সুইচ চেক: যদি আপনি #off করে রাখেন, এআই কোনো কাস্টমারকে উত্তর দেবে না
-            if (!isBotGloballyActive()) {
-                continue;
-            }
+            // 🛑 মাস্টার সুইচ চেক
+            if (!isBotGloballyActive()) continue;
 
+            // 🚫 এই কাস্টমারকে কি পূর্বে টেমপ্লেট টেক্সট দেওয়া হয়েছে? হলে বট আজীবনের জন্য চুপ থাকবে!
             if (isChatFiltered(jid)) continue;
 
             if (pausedUsers.has(jid)) {
@@ -501,13 +317,12 @@ async function connectToWhatsApp() {
             }
 
             let base64Image = null;
-            let hasMedia = false;
+            let extractedPdfText = "";
 
             if (msg.message?.imageMessage) {
                 try {
                     const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     base64Image = buffer.toString('base64');
-                    hasMedia = true;
                 } catch (e) {}
             }
 
@@ -515,49 +330,81 @@ async function connectToWhatsApp() {
                 try {
                     const buffer = await downloadMediaMessage(msg, 'buffer', {});
                     const pdfData = await pdfParse(buffer);
-                    text = `[পিডিএফ সার্কুলার টেক্সট]:\n${pdfData.text.slice(0, 1500)}\n\nকাস্টমার: ${text || "আবেদনের নিয়ম জানাও।"}`;
-                    hasMedia = true;
+                    extractedPdfText = pdfData.text.slice(0, 2000);
                 } catch (e) {}
             }
 
-            if (!text.trim() && !base64Image) continue;
+            if (!text && !base64Image && !extractedPdfText) continue;
 
-            try {
-                await sock.sendPresenceUpdate('composing', jid);
-            } catch (e) {}
+            // ==================== ধাপ ১: সাধারণ কুশল বিনিময় (শুধুমাত্র সালাম/হাই) ====================
+            const lowerText = text.toLowerCase();
+            const isPureGreeting = /^(সালাম|আসসালামু\s*আলাইকুম|assalam|salam|slm|হাই|হ্যালো|hello|hi|hlw|kemon asen|kmn asen|কেমন আছেন|ভালো আছেন)[\s!?.]*$/i.test(text);
 
-            const aiResponse = await getAIReply(jid, text, base64Image, hasMedia);
+            if (isPureGreeting && !base64Image && !extractedPdfText) {
+                let greetingReply = "জি ভাই, বলুন কীভাবে সাহায্য করতে পারি?";
+                if (/সালাম|আসসালামু|salam|assalam|slm/i.test(text)) {
+                    greetingReply = "ওয়ালাইকুম আসসালাম।";
+                } else if (/কেমন আছেন|kemon asen|kmn asen|ভালো আছেন/i.test(text)) {
+                    greetingReply = "আলহামদুলিল্লাহ, ভালো আছি।";
+                }
 
-            if (lastSentReplies.get(jid) === aiResponse) {
+                try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+                await delay(1500);
+                const sent = await sock.sendMessage(jid, { text: greetingReply });
+                if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
                 try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
-                continue;
+                continue; // কুশল বিনিময় শেষে কাস্টমারের পরবর্তী মূল প্রশ্নের অপেক্ষা করবে
+            }
+
+            // ==================== ধাপ ২: নিয়োগ সম্পর্কিত প্রশ্ন বা আবেদন পদ্ধতি যাচাই ====================
+            try { await sock.sendPresenceUpdate('composing', jid); } catch (e) {}
+
+            let methodCategory = "ONLINE";
+
+            // ক) যদি বোয়েসেল সম্পর্কিত হয়
+            if (/বোয়েসেল|বোয়েসেল|boesl/i.test(text)) {
+                methodCategory = "BSL";
+            } 
+            // খ) যদি ছবি বা পিডিএফ পাঠায়
+            else if (base64Image || extractedPdfText) {
+                methodCategory = await classifyJobMethod(extractedPdfText, base64Image);
+            } 
+            // গ) যদি চাকরির নাম লিখে সার্চ করতে হয়
+            else {
+                const article = await searchJobOnline(text);
+                if (article) {
+                    methodCategory = await classifyJobMethod(article, null);
+                } else {
+                    // নির্দিষ্ট না পেলে টেক্সট থেকেই ক্লাসিফাই করবে
+                    methodCategory = await classifyJobMethod(text, null);
+                }
+            }
+
+            // ==================== ধাপ ৩: উপযুক্ত টেক্সট ফাইল থেকে মেসেজ ডেলিভারি ====================
+            let finalReply = "";
+
+            if (methodCategory === "WALKIN") {
+                finalReply = getFileContent("walkin.txt", "এটি সরাসরি অফিসে গিয়ে ইন্টারভিউ দিতে হবে বা কাগজপত্র জমা দিতে হবে। অনলাইনে আবেদন করা যাবে না।");
+            } else if (methodCategory === "FORM") {
+                finalReply = getFileContent("form.txt", "এটি ডাকযোগে বা কুরিয়ারে আবেদন ফরম পাঠাতে হবে। অনলাইনে আবেদন করা যাবে না।");
+            } else if (methodCategory === "BSL") {
+                finalReply = getFileContent("bsl.txt", "বোয়েসেলের এই নিয়োগে তাদের নিয়ম অনুযায়ী আবেদন সম্পন্ন করতে হবে।");
+            } else {
+                // ডিফল্ট অনলাইন আবেদন
+                finalReply = getFileContent("online.txt", "হ্যাঁ ভাই, এটা আমরা অনলাইনে আবেদন করে দিতে পারব। আপনার প্রয়োজনীয় কাগজপত্র পাঠিয়ে দিন।");
             }
 
             await delay(2000);
 
-            if (aiResponse.includes("[ALERT_ADMIN]")) {
-                const cleanReply = aiResponse.replace("[ALERT_ADMIN]", "").trim();
-                const sent1 = await sock.sendMessage(jid, { text: cleanReply });
-                if (sent1?.key?.id) botSentMessageIds.add(sent1.key.id);
+            // টেক্সট ফাইল থেকে হুবহু মেসেজটি পাঠিয়ে দেওয়া
+            const sent = await sock.sendMessage(jid, { text: finalReply });
+            if (sent?.key?.id) botSentMessageIds.add(sent.key.id);
+            try { await sock.sendPresenceUpdate('paused', jid); } catch (e) {}
 
-                if (ADMIN_NUMBER && ADMIN_NUMBER.includes("@s.whatsapp.net")) {
-                    await sock.sendMessage(ADMIN_NUMBER, {
-                        text: `⚠️ [পেমেন্ট অ্যালার্ট] কাস্টমার: ${jid.split('@')[0]}\nপেমেন্ট করতে চাচ্ছে। চ্যাটে নজর দিন!`
-                    });
-                }
-                pausedUsers.set(jid, Date.now() + 24 * 60 * 60 * 1000);
-                continue;
-            }
-
-            const sent = await sock.sendMessage(jid, { text: aiResponse });
-            if (sent?.key?.id) {
-                botSentMessageIds.add(sent.key.id);
-                lastSentReplies.set(jid, aiResponse);
-            }
-
-            try {
-                await sock.sendPresenceUpdate('paused', jid);
-            } catch (e) {}
+            // 🔒 অতি গুরুত্বপূর্ণ: টেক্সট পাঠানো শেষ! এই কাস্টমারকে আজীবনের জন্য লক করা হলো।
+            addStoppedUser(jid);
+            pausedUsers.set(jid, Infinity);
+            console.log(`🛑 ${jid} নম্বরে ${methodCategory} টেমপ্লেট পাঠানো হয়েছে এবং বট পার্মানেন্ট পজ করা হয়েছে।`);
         }
     });
 
@@ -629,7 +476,7 @@ async function getJidFromInvite(code) {
     return null;
 }
 
-// 📢 হোয়াটসঅ্যাপ চ্যানেলে পোস্ট করার রুট (২৪/৭ চলবে, কখনোই ডিসকানেক্ট হবে না)
+// 📢 চ্যানেলে অটো-পোস্ট রুট (২৪/৭ চালু থাকবে)
 app.post('/send', async (req, res) => {
     try {
         const { channel_id, text, images } = req.body;
